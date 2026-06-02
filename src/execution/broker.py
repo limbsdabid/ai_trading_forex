@@ -66,6 +66,7 @@ class PaperBroker(Broker):
         self.positions: dict[str, Position] = {}
         self.closed_orders: list[Order] = []
         self._order_counter = 0
+        self._margin_used: dict[str, float] = {}  # track margin per position key
         self.on_close: Optional[Callable] = None
 
     def get_positions(self) -> list[Position]:
@@ -96,7 +97,8 @@ class PaperBroker(Broker):
 
         for key, pos, result in to_close:
             pnl = self._calculate_pnl(pos, pos.current_price)
-            self.balance += (pos.volume * 1000) + pnl
+            margin = self._margin_used.pop(key, pos.volume * 1000)
+            self.balance += margin + pnl  # return margin, add/subtract PnL
             del self.positions[key]
             if self.on_close:
                 self.on_close(key, pos.current_price, datetime.now().isoformat(), pnl, result)
@@ -113,7 +115,8 @@ class PaperBroker(Broker):
         order.order_id = f"paper_{self._order_counter}"
         order.created_at = datetime.now().isoformat()
 
-        if self.balance < order.volume * 1000:
+        margin = order.volume * 1000  # simplified margin requirement
+        if self.balance < margin:
             order.status = "rejected"
             self.closed_orders.append(order)
             return order
@@ -132,6 +135,7 @@ class PaperBroker(Broker):
                 + (order.executed_price * order.volume)
             ) / total_vol
             existing.volume = total_vol
+            self._margin_used[position_key] = self._margin_used.get(position_key, 0) + margin
         else:
             self.positions[position_key] = Position(
                 symbol=order.symbol,
@@ -143,8 +147,9 @@ class PaperBroker(Broker):
                 take_profit=order.take_profit or 0,
                 unrealized_pnl=0.0,
             )
+            self._margin_used[position_key] = margin
 
-        self.balance -= order.volume * 1000
+        self.balance -= margin  # reserve margin from free balance
         self.closed_orders.append(order)
         return order
 
@@ -156,9 +161,10 @@ class PaperBroker(Broker):
         pos = self.positions[position_key]
         exit_price = self._mock_price(symbol)
         pnl = self._calculate_pnl(pos, exit_price)
+        margin = self._margin_used.pop(position_key, pos.volume * 1000)
         pos.realized_pnl += pnl
         pos.unrealized_pnl = 0
-        self.balance += (pos.volume * 1000) + pnl
+        self.balance += margin + pnl  # return margin + net PnL
         del self.positions[position_key]
         if self.on_close:
             self.on_close(position_key, exit_price, datetime.now().isoformat(), pnl, 'manual')
@@ -189,7 +195,19 @@ class PaperBroker(Broker):
 
     @staticmethod
     def _calculate_pnl(position: Position, exit_price: float) -> float:
+        # Correct pip-based PnL formula
+        # JPY pairs: 1 pip = 0.01, pip value ≈ $6.67/lot (at ~150)
+        # All others: 1 pip = 0.0001, pip value = $10/lot
+        if "JPY" in position.symbol:
+            pip_size = 0.01
+            pip_value = 1_000 / exit_price  # ~$6.67 per pip per lot at 150
+        else:
+            pip_size = 0.0001
+            pip_value = 10.0  # $10 per pip per standard lot
+
         diff = exit_price - position.entry_price
         if position.side == OrderSide.SELL:
             diff = -diff
-        return diff * position.volume * 100_000
+
+        pips = diff / pip_size
+        return round(pips * pip_value * position.volume, 2)

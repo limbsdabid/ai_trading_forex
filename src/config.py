@@ -56,7 +56,7 @@ class Config:
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             paper_trading=os.getenv("PAPER_TRADING", "true").lower() == "true",
             timeframe=os.getenv("TIMEFRAME", "H1"),
-            scan_interval_minutes=int(os.getenv("SCAN_INTERVAL", "60")),
+            scan_interval_minutes=max(1, min(int(os.getenv("SCAN_INTERVAL", "5")), 60)),
             telegram_bot_token=_load_secret("ai_trading_forex", "telegram_bot_token", "TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         )

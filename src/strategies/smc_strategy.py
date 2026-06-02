@@ -77,16 +77,29 @@ def detect_choch_m5(m5_avail, bias):
     if len(m5_avail) < 20:
         return False
     highs, lows = find_swings(m5_avail)
+
     if bias == 'bullish' and len(lows) >= 3:
-        if lows['p'].iloc[-3] > lows['p'].iloc[-2] and lows['p'].iloc[-1] > lows['p'].iloc[-2]:
-            recent_highs = highs[highs['t'] < lows['t'].iloc[-1]]
+        # True higher lows: each successive low must be HIGHER than the previous
+        hl1 = lows['p'].iloc[-3]  # oldest
+        hl2 = lows['p'].iloc[-2]  # middle
+        hl3 = lows['p'].iloc[-1]  # newest
+        if hl2 > hl1 and hl3 > hl2:  # ascending lows = bullish structure
+            # Confirm: price breaks above a recent swing high (CHoCH break)
+            recent_highs = highs[highs['t'] > lows['t'].iloc[-2]]
             if len(recent_highs) > 0 and m5_avail['high'].iloc[-1] > recent_highs['p'].iloc[-1]:
                 return True
+
     elif bias == 'bearish' and len(highs) >= 3:
-        if highs['p'].iloc[-3] < highs['p'].iloc[-2] and highs['p'].iloc[-1] < highs['p'].iloc[-2]:
-            recent_lows = lows[lows['t'] < highs['t'].iloc[-1]]
+        # True lower highs: each successive high must be LOWER than the previous
+        lh1 = highs['p'].iloc[-3]  # oldest
+        lh2 = highs['p'].iloc[-2]  # middle
+        lh3 = highs['p'].iloc[-1]  # newest
+        if lh2 < lh1 and lh3 < lh2:  # descending highs = bearish structure
+            # Confirm: price breaks below a recent swing low (CHoCH break)
+            recent_lows = lows[lows['t'] > highs['t'].iloc[-2]]
             if len(recent_lows) > 0 and m5_avail['low'].iloc[-1] < recent_lows['p'].iloc[-1]:
                 return True
+
     return False
 
 
