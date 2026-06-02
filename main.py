@@ -45,7 +45,11 @@ class TradingBot:
             max_positions=config.max_positions,
         )
         self.strategies: list[Strategy] = [
-            SMCStrategy(risk_manager=self.risk_manager, data_provider=self.data_provider),
+            SMCStrategy(
+                risk_manager=self.risk_manager,
+                data_provider=self.data_provider,
+                ml_threshold=config.ml_threshold,
+            ),
         ]
         self.broker.on_close = self._on_trade_closed
         self.notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)

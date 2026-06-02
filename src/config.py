@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from typing import Optional
-from pathlib import Path
 from dotenv import load_dotenv
 import os
 
@@ -8,13 +7,7 @@ load_dotenv()
 
 
 def _load_secret(service: str, key: str, env_var: str, default: str = "") -> str:
-    try:
-        import keyring
-        val = keyring.get_password(service, key)
-        if val:
-            return val
-    except Exception:
-        pass
+    """Read sensitive config from environment variables (.env file)."""
     return os.getenv(env_var, default)
 
 
@@ -44,6 +37,10 @@ class Config:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # ML filter — minimum win-probability to allow a trade
+    # 0.52 → 64% WR ~13 trades/month | 0.55 → 80% WR ~5 trades/month
+    ml_threshold: float = 0.52
+
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
@@ -59,4 +56,5 @@ class Config:
             scan_interval_minutes=max(1, min(int(os.getenv("SCAN_INTERVAL", "5")), 60)),
             telegram_bot_token=_load_secret("ai_trading_forex", "telegram_bot_token", "TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            ml_threshold=float(os.getenv("ML_THRESHOLD", "0.52")),
         )

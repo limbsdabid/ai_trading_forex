@@ -7,6 +7,7 @@ import numpy as np
 
 from .base import Strategy, Signal, SignalType
 from src.risk import RiskManager
+from src.ml.filter import MLFilter
 
 
 SPREAD_COST = 0.0001
@@ -115,10 +116,17 @@ def get_next_liquidity(m5_avail, bias):
 
 
 class SMCStrategy(Strategy):
-    def __init__(self, risk_manager: RiskManager, data_provider=None, params: dict = None):
+    def __init__(self, risk_manager: RiskManager, data_provider=None,
+                 params: dict = None, ml_threshold: float = 0.55):
         super().__init__("smc", params)
         self.risk_manager = risk_manager
         self.data_provider = data_provider
+        self.ml_filter = MLFilter(threshold=ml_threshold)
+        if self.ml_filter.available:
+            import logging
+            logging.getLogger("trading_bot").info(
+                f"MLFilter active — threshold={ml_threshold}"
+            )
 
     def generate_signal(self, data: pd.DataFrame, symbol: str) -> Signal:
         if self.data_provider is None:
@@ -126,9 +134,10 @@ class SMCStrategy(Strategy):
 
         current_time = datetime.now()
 
-        h4 = self._fetch_data(symbol, 'H4', 300)
+        h4  = self._fetch_data(symbol, 'H4',  300)
         m15 = self._fetch_data(symbol, 'M15', 1000)
-        m5 = self._fetch_data(symbol, 'M5', 500)
+        m5  = self._fetch_data(symbol, 'M5',  500)
+        h1  = self._fetch_data(symbol, 'H1',  100)  # for ML filter
 
         if h4 is None or m15 is None or m5 is None:
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
@@ -155,6 +164,19 @@ class SMCStrategy(Strategy):
         if not detect_choch_m5(m5, bias):
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
 
+        # ── ML Filter gate ──────────────────────────────────────────────
+        ml_score = 0.5
+        if h1 is not None:
+            allow, ml_score = self.ml_filter.should_trade(h1)
+            if not allow:
+                import logging
+                logging.getLogger("trading_bot").info(
+                    f"{symbol}: ML filter blocked (score={ml_score:.3f} < "
+                    f"{self.ml_filter.threshold})"
+                )
+                return Signal(type=SignalType.HOLD, symbol=symbol, confidence=ml_score)
+        # ────────────────────────────────────────────────────────────────
+
         m5_highs, m5_lows = find_swings(m5)
         if bias == 'bullish' and len(m5_lows) > 0:
             sl_price = m5_lows['p'].iloc[-1] - 0.0001
@@ -174,7 +196,8 @@ class SMCStrategy(Strategy):
             elif bias == 'bearish' and tp_price >= price:
                 tp_price = price - sl_pips * 2 * 0.0001
         else:
-            tp_price = price + sl_pips * 2 * 0.0001 if bias == 'bullish' else price - sl_pips * 2 * 0.0001
+            tp_price = (price + sl_pips * 2 * 0.0001 if bias == 'bullish'
+                        else price - sl_pips * 2 * 0.0001)
 
         sl = price - sl_pips * 0.0001 if bias == 'bullish' else price + sl_pips * 0.0001
         tp = tp_price
@@ -185,21 +208,25 @@ class SMCStrategy(Strategy):
 
         sizing.volume = min(sizing.volume, 1.0)
 
-        direction = 'buy' if bias == 'bullish' else 'sell'
+        direction   = 'buy' if bias == 'bullish' else 'sell'
         signal_type = SignalType.BUY if bias == 'bullish' else SignalType.SELL
+
+        # Blend SMC confidence (0.7 base) with ML score
+        confidence = round(0.5 * 0.7 + 0.5 * ml_score, 3)
 
         return Signal(
             type=signal_type,
             symbol=symbol,
-            confidence=0.7,
+            confidence=confidence,
             metadata={
-                'sl': sl,
-                'tp': tp,
-                'sl_pips': sl_pips,
-                'volume': sizing.volume,
-                'bias': bias,
-                'entry': price,
+                'sl':        sl,
+                'tp':        tp,
+                'sl_pips':   sl_pips,
+                'volume':    sizing.volume,
+                'bias':      bias,
+                'entry':     price,
                 'direction': direction,
+                'ml_score':  ml_score,
             }
         )
 
