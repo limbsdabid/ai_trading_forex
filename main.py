@@ -167,11 +167,6 @@ class TradingBot:
         tp_price = meta.get('tp', 0.0)
         volume = meta.get('volume', 0.01)
 
-        self.notifier.send_signal(
-            signal.symbol, side.value, price, sl_price, tp_price,
-            volume, signal.confidence
-        )
-
         sizing = self.risk_manager.calculate_size(price, sl_price, signal.symbol)
         if not sizing:
             log.info(f"{signal.symbol}: risk limits reached, skipping")
@@ -207,8 +202,10 @@ class TradingBot:
                 'tp': tp_price,
                 'volume': volume,
             }
+            ml_score = meta.get('ml_score', None)
             self.notifier.send_trade_opened(
-                signal.symbol, side.value, price, sl_price, tp_price, volume
+                signal.symbol, side.value, price, sl_price, tp_price, volume,
+                ml_score=ml_score,
             )
 
     def _on_trade_closed(self, key: str, exit_price: float, exit_time: str, pnl: float, result: str):
