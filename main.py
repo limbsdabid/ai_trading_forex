@@ -36,8 +36,7 @@ class TradingBot:
             self.broker: Broker = PaperBroker(config.account_balance)
         else:
             self.broker: Broker = LiveBroker()
-            if config.use_mt5:
-                config.account_balance = self.broker.get_account_balance()
+        # Note: balance sync happens AFTER MT5 connects in start()
         self.risk_manager = RiskManager(
             account_balance=config.account_balance,
             risk_per_trade=config.risk_per_trade,
@@ -232,6 +231,10 @@ class TradingBot:
             ])
 
         self.risk_manager.close_trade()
+
+        # Sync actual balance from MT5 after every closed trade (LiveBroker only)
+        if self.config.use_mt5 and not self.config.paper_trading:
+            self._sync_mt5_account()
 
         symbol = trade.get('symbol', key.split('_')[0] if '_' in key else key)
         side = trade.get('side', '')
