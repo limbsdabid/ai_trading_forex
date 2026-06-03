@@ -59,6 +59,16 @@ class Broker:
         raise NotImplementedError
 
 
+# Typical spreads in pips per symbol (used by PaperBroker for realistic fills)
+SPREAD_PIPS: dict[str, float] = {
+    "EURUSD": 1.0, "GBPUSD": 1.2, "USDJPY": 1.2,
+    "USDCHF": 1.5, "AUDUSD": 1.5, "USDCAD": 1.8,
+    "NZDUSD": 2.0,
+}
+DEFAULT_SPREAD_PIPS = 1.5   # fallback for unlisted symbols
+SLIPPAGE_PIPS       = 0.5   # fixed slippage on market orders
+
+
 class PaperBroker(Broker):
     def __init__(self, initial_balance: float = 10_000):
         self.balance = initial_balance
@@ -123,7 +133,15 @@ class PaperBroker(Broker):
 
         order.status = "executed"
         order.executed_at = datetime.now().isoformat()
-        order.executed_price = order.price or self._mock_price(order.symbol)
+        mid_price = order.price or self._mock_price(order.symbol)
+        pip_size  = 0.01 if "JPY" in order.symbol else 0.0001
+        spread    = SPREAD_PIPS.get(order.symbol, DEFAULT_SPREAD_PIPS) * pip_size
+        slip      = SLIPPAGE_PIPS * pip_size
+        # BUY fills at ask (mid + spread/2 + slippage), SELL at bid (mid - spread/2 - slippage)
+        if order.side == OrderSide.BUY:
+            order.executed_price = round(mid_price + spread / 2 + slip, 5)
+        else:
+            order.executed_price = round(mid_price - spread / 2 - slip, 5)
 
         position_key = f"{order.symbol}_{order.side.value}"
 
