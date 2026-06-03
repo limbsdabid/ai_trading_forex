@@ -8,6 +8,7 @@ import numpy as np
 from .base import Strategy, Signal, SignalType
 from src.risk import RiskManager
 from src.ml.filter import MLFilter
+from src.strategies.session_filter import get_session_threshold
 
 
 SPREAD_COST = 0.0001
@@ -164,19 +165,27 @@ class SMCStrategy(Strategy):
         if not detect_choch_m5(m5, bias):
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
 
-        # ── ML Filter gate ──────────────────────────────────────────────
+        # ── ML Filter gate (session-adjusted threshold) ──────────────────
+        import logging
+        log = logging.getLogger("trading_bot")
         ml_score = 0.5
-        if h1 is not None:
-            allow, ml_score = self.ml_filter.should_trade(h1)
-            if not allow:
-                import logging
-                logging.getLogger("trading_bot").info(
-                    f"{symbol}: ML filter blocked (score={ml_score:.3f} < "
-                    f"{self.ml_filter.threshold})"
-                )
-                return Signal(type=SignalType.HOLD, symbol=symbol, confidence=ml_score)
-        # ────────────────────────────────────────────────────────────────
+        if h1 is not None and self.ml_filter.available:
+            ml_score = self.ml_filter.score(h1)
 
+        session_threshold, session = get_session_threshold(self.ml_filter.threshold)
+        log.debug(
+            f"{symbol}: {session.description} | "
+            f"base={self.ml_filter.threshold:.2f} → "
+            f"threshold={session_threshold:.2f} | score={ml_score:.3f}"
+        )
+
+        if ml_score < session_threshold:
+            log.info(
+                f"{symbol}: ML blocked [{session.description}] "
+                f"score={ml_score:.3f} < threshold={session_threshold:.2f}"
+            )
+            return Signal(type=SignalType.HOLD, symbol=symbol, confidence=ml_score)
+        # ──────────────────────────────────────────────────────────────────
         m5_highs, m5_lows = find_swings(m5)
         if bias == 'bullish' and len(m5_lows) > 0:
             sl_price = m5_lows['p'].iloc[-1] - 0.0001
