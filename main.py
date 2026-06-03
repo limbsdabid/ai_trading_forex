@@ -36,8 +36,7 @@ class TradingBot:
             self.broker: Broker = PaperBroker(config.account_balance)
         else:
             self.broker: Broker = LiveBroker()
-            if config.use_mt5:
-                config.account_balance = self.broker.get_account_balance()
+        # Note: balance sync happens AFTER MT5 connects in start()
         self.risk_manager = RiskManager(
             account_balance=config.account_balance,
             risk_per_trade=config.risk_per_trade,
@@ -45,7 +44,11 @@ class TradingBot:
             max_positions=config.max_positions,
         )
         self.strategies: list[Strategy] = [
-            SMCStrategy(risk_manager=self.risk_manager, data_provider=self.data_provider),
+            SMCStrategy(
+                risk_manager=self.risk_manager,
+                data_provider=self.data_provider,
+                ml_threshold=config.ml_threshold,
+            ),
         ]
         self.broker.on_close = self._on_trade_closed
         self.notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
@@ -163,11 +166,6 @@ class TradingBot:
         tp_price = meta.get('tp', 0.0)
         volume = meta.get('volume', 0.01)
 
-        self.notifier.send_signal(
-            signal.symbol, side.value, price, sl_price, tp_price,
-            volume, signal.confidence
-        )
-
         sizing = self.risk_manager.calculate_size(price, sl_price, signal.symbol)
         if not sizing:
             log.info(f"{signal.symbol}: risk limits reached, skipping")
@@ -203,8 +201,10 @@ class TradingBot:
                 'tp': tp_price,
                 'volume': volume,
             }
+            ml_score = meta.get('ml_score', None)
             self.notifier.send_trade_opened(
-                signal.symbol, side.value, price, sl_price, tp_price, volume
+                signal.symbol, side.value, price, sl_price, tp_price, volume,
+                ml_score=ml_score,
             )
 
     def _on_trade_closed(self, key: str, exit_price: float, exit_time: str, pnl: float, result: str):
@@ -231,6 +231,10 @@ class TradingBot:
             ])
 
         self.risk_manager.close_trade()
+
+        # Sync actual balance from MT5 after every closed trade (LiveBroker only)
+        if self.config.use_mt5 and not self.config.paper_trading:
+            self._sync_mt5_account()
 
         symbol = trade.get('symbol', key.split('_')[0] if '_' in key else key)
         side = trade.get('side', '')
