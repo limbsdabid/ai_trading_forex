@@ -26,9 +26,22 @@ log = logging.getLogger("trading_bot")
 
 MODEL_PATH    = Path(__file__).parent.parent.parent / "models" / "ml_filter.pkl"
 FEATURES_PATH = Path(__file__).parent.parent.parent / "models" / "ml_filter_features.pkl"
+MODELS_DIR    = Path(__file__).parent.parent.parent / "models"
 
 # Default threshold — above this we allow the trade
 DEFAULT_THRESHOLD = 0.55
+
+
+def _model_paths(symbol: str) -> tuple[Path, Path]:
+    """Return (model_path, features_path) for a given symbol.
+    Falls back to the generic ml_filter.pkl if per-symbol file doesn't exist."""
+    sym = symbol.upper()
+    sym_model    = MODELS_DIR / f"{sym}_ml_filter.pkl"
+    sym_features = MODELS_DIR / f"{sym}_ml_filter_features.pkl"
+    if sym_model.exists() and sym_features.exists():
+        return sym_model, sym_features
+    # Fallback to generic (EURUSD-trained) model
+    return MODEL_PATH, FEATURES_PATH
 
 
 def _session(hour: int) -> int:
@@ -176,32 +189,43 @@ class MLFilter:
     ----------
     threshold : float
         Minimum win-probability required to allow a trade (default 0.55).
+    symbol : str
+        Currency pair (e.g. "EURUSD"). Loads models/{SYMBOL}_ml_filter.pkl
+        if available, otherwise falls back to the generic ml_filter.pkl.
     model_path : Path | None
-        Override default model path (for testing).
+        Override model path directly (for testing). Skips symbol lookup.
     """
 
     def __init__(self, threshold: float = DEFAULT_THRESHOLD,
+                 symbol: str = "EURUSD",
                  model_path: Optional[Path] = None):
         self.threshold  = threshold
+        self.symbol     = symbol.upper()
         self._model     = None
         self._features  = None
         self._available = False
-        self._load(model_path or MODEL_PATH)
 
-    def _load(self, path: Path) -> None:
+        if model_path is not None:
+            # Explicit override (e.g. tests)
+            self._load(model_path, FEATURES_PATH)
+        else:
+            m_path, f_path = _model_paths(self.symbol)
+            self._load(m_path, f_path)
+
+    def _load(self, model_path: Path, features_path: Path) -> None:
         try:
             import joblib
-            self._model    = joblib.load(path)
-            self._features = joblib.load(FEATURES_PATH)
+            self._model    = joblib.load(model_path)
+            self._features = joblib.load(features_path)
             self._available = True
-            log.info(f"MLFilter loaded from {path}")
+            log.info(f"MLFilter [{self.symbol}] loaded from {model_path}")
         except FileNotFoundError:
             log.warning(
-                "MLFilter model not found — running without ML filter. "
+                f"MLFilter [{self.symbol}] model not found — running without ML filter. "
                 "Train first: python src/ml/train.py"
             )
         except Exception as e:
-            log.warning(f"MLFilter failed to load: {e}")
+            log.warning(f"MLFilter [{self.symbol}] failed to load: {e}")
 
     @property
     def available(self) -> bool:

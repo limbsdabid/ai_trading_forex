@@ -2,12 +2,17 @@
 Train / retrain the ML signal filter.
 
 Run from project root:
-    python src/ml/train.py
+    python src/ml/train.py              # trains all available pairs
+    python src/ml/train.py EURUSD       # trains one specific symbol
+    python src/ml/train.py data/EURUSD_H1_ML.csv  # legacy single-file usage
 
-Reads:  data/EURUSD_H1_ML.csv  (or pulls fresh data from MT5 if available)
-Writes: models/ml_filter.pkl
-        models/ml_filter_features.pkl
-        models/ml_filter_report.txt
+Reads:  data/{SYMBOL}_H1_ML.csv  for each symbol
+Writes: models/{SYMBOL}_ml_filter.pkl
+        models/{SYMBOL}_ml_filter_features.pkl
+        models/{SYMBOL}_ml_filter_report.txt
+        models/ml_filter.pkl              (kept for backward compat — copy of EURUSD)
+        models/ml_filter_features.pkl     (kept for backward compat)
+        models/ml_filter_report.txt       (kept for backward compat)
 """
 
 import os
@@ -23,11 +28,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent
-DATA_PATH    = ROOT / "data" / "EURUSD_H1_ML.csv"
+DATA_PATH    = ROOT / "data" / "EURUSD_H1_ML.csv"   # kept for backward compat
 MODELS_DIR   = ROOT / "models"
-MODEL_PATH   = MODELS_DIR / "ml_filter.pkl"
-FEATURES_PATH= MODELS_DIR / "ml_filter_features.pkl"
-REPORT_PATH  = MODELS_DIR / "ml_filter_report.txt"
+MODEL_PATH   = MODELS_DIR / "ml_filter.pkl"          # kept for backward compat
+FEATURES_PATH= MODELS_DIR / "ml_filter_features.pkl" # kept for backward compat
+REPORT_PATH  = MODELS_DIR / "ml_filter_report.txt"   # kept for backward compat
+
+ALL_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
 
 FEATURES = [
     "rsi", "rsi_lag1",
@@ -111,11 +118,12 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def train(data_path: Path = DATA_PATH) -> None:
+def train(data_path: Path = DATA_PATH, symbol: str = "EURUSD") -> None:
+    """Train one model for a single symbol and save as models/{SYMBOL}_ml_filter.pkl."""
     from xgboost import XGBClassifier
     from sklearn.metrics import roc_auc_score, classification_report
 
-    log.info(f"Loading data from {data_path}")
+    log.info(f"[{symbol}] Loading data from {data_path}")
     df = pd.read_csv(data_path, parse_dates=["time"])
     df = df.sort_values("time").reset_index(drop=True)
 
@@ -143,7 +151,7 @@ def train(data_path: Path = DATA_PATH) -> None:
             df["macd_hist"] = df["macd"] - df["macd_signal"]
 
     df = df.dropna(subset=FEATURES + ["Target"])
-    log.info(f"Samples after dropna: {len(df)}")
+    log.info(f"[{symbol}] Samples after dropna: {len(df)}")
 
     X = df[FEATURES]
     y = df["Target"].astype(int)
@@ -152,11 +160,11 @@ def train(data_path: Path = DATA_PATH) -> None:
     tr_end  = int(n * 0.70)
     val_end = int(n * 0.85)
 
-    X_tr,  y_tr  = X.iloc[:tr_end],      y.iloc[:tr_end]
+    X_tr,  y_tr  = X.iloc[:tr_end],       y.iloc[:tr_end]
     X_val, y_val = X.iloc[tr_end:val_end], y.iloc[tr_end:val_end]
-    X_te,  y_te  = X.iloc[val_end:],      y.iloc[val_end:]
+    X_te,  y_te  = X.iloc[val_end:],       y.iloc[val_end:]
 
-    log.info(f"Train: {len(X_tr)} | Val: {len(X_val)} | Test: {len(X_te)}")
+    log.info(f"[{symbol}] Train: {len(X_tr)} | Val: {len(X_val)} | Test: {len(X_te)}")
 
     model = XGBClassifier(
         n_estimators=300,
@@ -180,11 +188,11 @@ def train(data_path: Path = DATA_PATH) -> None:
     acc_te   = model.score(X_te, y_te)
     report   = classification_report(y_te, model.predict(X_te), target_names=["Loss","Win"])
 
-    log.info(f"Test AUC:      {auc_te:.3f}")
-    log.info(f"Test Accuracy: {acc_te:.3f}")
+    log.info(f"[{symbol}] Test AUC:      {auc_te:.3f}")
+    log.info(f"[{symbol}] Test Accuracy: {acc_te:.3f}")
 
     lines = [
-        "=== ML Filter Training Report ===",
+        f"=== ML Filter Training Report — {symbol} ===",
         f"Data: {data_path}",
         f"Samples: {len(df)} (train={len(X_tr)}, val={len(X_val)}, test={len(X_te)})",
         f"Test AUC:      {auc_te:.3f}",
@@ -198,7 +206,7 @@ def train(data_path: Path = DATA_PATH) -> None:
         if mask.sum() == 0:
             lines.append(f"  >= {t}: 0 signals")
             continue
-        wr = y_te.values[mask] .mean() * 100
+        wr = y_te.values[mask].mean() * 100
         lines.append(f"  >= {t}: {mask.sum():4d} signals | WR={wr:.1f}%")
 
     lines += ["", "Feature Importances:"]
@@ -213,15 +221,62 @@ def train(data_path: Path = DATA_PATH) -> None:
     log.info("\n" + report_text)
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report_text)
-    joblib.dump(model,    MODEL_PATH)
-    joblib.dump(FEATURES, FEATURES_PATH)
 
-    log.info(f"Model   → {MODEL_PATH}")
-    log.info(f"Features→ {FEATURES_PATH}")
-    log.info(f"Report  → {REPORT_PATH}")
+    # Per-symbol paths
+    sym_model_path    = MODELS_DIR / f"{symbol}_ml_filter.pkl"
+    sym_features_path = MODELS_DIR / f"{symbol}_ml_filter_features.pkl"
+    sym_report_path   = MODELS_DIR / f"{symbol}_ml_filter_report.txt"
+
+    joblib.dump(model,    sym_model_path)
+    joblib.dump(FEATURES, sym_features_path)
+    sym_report_path.write_text(report_text)
+
+    log.info(f"[{symbol}] Model   → {sym_model_path}")
+    log.info(f"[{symbol}] Features→ {sym_features_path}")
+    log.info(f"[{symbol}] Report  → {sym_report_path}")
+
+    # Backward compat: keep generic ml_filter.pkl in sync with EURUSD
+    if symbol == "EURUSD":
+        joblib.dump(model,    MODEL_PATH)
+        joblib.dump(FEATURES, FEATURES_PATH)
+        REPORT_PATH.write_text(report_text)
+        log.info(f"[{symbol}] Backward-compat model → {MODEL_PATH}")
+
+
+def train_all() -> None:
+    """Train one model per symbol for all available CSV files."""
+    results = []
+    for sym in ALL_SYMBOLS:
+        csv_path = ROOT / "data" / f"{sym}_H1_ML.csv"
+        if not csv_path.exists():
+            log.warning(f"[{sym}] CSV not found, skipping: {csv_path}")
+            results.append((sym, "SKIPPED"))
+            continue
+        try:
+            train(csv_path, sym)
+            results.append((sym, "OK"))
+        except Exception as e:
+            log.error(f"[{sym}] Training failed: {e}")
+            results.append((sym, f"ERROR: {e}"))
+
+    log.info("\n=== Training Summary ===")
+    for sym, status in results:
+        log.info(f"  {sym:10s} {status}")
 
 
 if __name__ == "__main__":
-    data_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DATA_PATH
-    train(data_path)
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    if arg is None:
+        # No args → train all available symbols
+        train_all()
+    elif arg.upper() in ALL_SYMBOLS:
+        # e.g. python src/ml/train.py GBPUSD
+        sym = arg.upper()
+        csv_path = ROOT / "data" / f"{sym}_H1_ML.csv"
+        train(csv_path, sym)
+    else:
+        # Legacy: python src/ml/train.py data/EURUSD_H1_ML.csv
+        data_path = Path(arg)
+        sym = data_path.stem.split("_")[0].upper()
+        train(data_path, sym)

@@ -119,14 +119,11 @@ class SMCStrategy(Strategy):
     def __init__(self, risk_manager: RiskManager, data_provider=None,
                  params: dict = None, ml_threshold: float = 0.55):
         super().__init__("smc", params)
-        self.risk_manager = risk_manager
+        self.risk_manager  = risk_manager
         self.data_provider = data_provider
-        self.ml_filter = MLFilter(threshold=ml_threshold)
-        if self.ml_filter.available:
-            import logging
-            logging.getLogger("trading_bot").info(
-                f"MLFilter active — threshold={ml_threshold}"
-            )
+        self.ml_threshold  = ml_threshold
+        # Per-symbol MLFilter cache — loaded lazily on first use per symbol
+        self._ml_filters: dict[str, MLFilter] = {}
 
     def generate_signal(self, data: pd.DataFrame, symbol: str) -> Signal:
         if self.data_provider is None:
@@ -167,12 +164,22 @@ class SMCStrategy(Strategy):
         # ── ML Filter gate ──────────────────────────────────────────────
         ml_score = 0.5
         if h1 is not None:
-            allow, ml_score = self.ml_filter.should_trade(h1)
+            # Lazy-load per-symbol filter (cached after first use)
+            if symbol not in self._ml_filters:
+                self._ml_filters[symbol] = MLFilter(
+                    threshold=self.ml_threshold, symbol=symbol
+                )
+                if self._ml_filters[symbol].available:
+                    import logging
+                    logging.getLogger("trading_bot").info(
+                        f"MLFilter [{symbol}] active — threshold={self.ml_threshold}"
+                    )
+            allow, ml_score = self._ml_filters[symbol].should_trade(h1)
             if not allow:
                 import logging
                 logging.getLogger("trading_bot").info(
                     f"{symbol}: ML filter blocked (score={ml_score:.3f} < "
-                    f"{self.ml_filter.threshold})"
+                    f"{self.ml_threshold})"
                 )
                 return Signal(type=SignalType.HOLD, symbol=symbol, confidence=ml_score)
         # ────────────────────────────────────────────────────────────────
