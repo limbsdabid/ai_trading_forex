@@ -211,7 +211,8 @@ class TradingBot:
     def _on_trade_closed(self, key: str, exit_price: float, exit_time: str, pnl: float, result: str):
         trade = self._open_trades.pop(key, {})
         symbol = trade.get('symbol') or key.split('_')[0]
-        self.risk_manager.close_trade(symbol)   # release the symbol slot
+        self.risk_manager.close_trade(symbol)
+
         file_exists = TRADE_LOG_PATH.exists()
         TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(TRADE_LOG_PATH, "a", newline="") as f:
@@ -221,7 +222,7 @@ class TradingBot:
                                "volume", "exit_price", "exit_time", "pnl", "result"])
             writer.writerow([
                 trade.get('timestamp', ''),
-                trade.get('symbol', key.split('_')[0] if '_' in key else key),
+                symbol,
                 trade.get('side', ''),
                 round(trade['entry'], 5) if 'entry' in trade else '',
                 round(trade['sl'], 5) if 'sl' in trade else '',
@@ -233,13 +234,10 @@ class TradingBot:
                 result,
             ])
 
-        self.risk_manager.close_trade()
-
         # Sync actual balance from MT5 after every closed trade (LiveBroker only)
         if self.config.use_mt5 and not self.config.paper_trading:
             self._sync_mt5_account()
 
-        symbol = trade.get('symbol', key.split('_')[0] if '_' in key else key)
         side = trade.get('side', '')
         entry = trade.get('entry', 0.0)
         self.notifier.send_trade_closed(symbol, side, entry, exit_price, pnl, result)
