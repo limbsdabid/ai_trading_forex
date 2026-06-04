@@ -1,0 +1,42 @@
+=== ML Filter Training Report — USDCAD ===
+Data: C:\Users\david\repos\ai_trading_forex\data\USDCAD_H1_ML.csv
+Samples: 4980 (train=3486, val=747, test=747)
+Test AUC:      0.551
+Test Accuracy: 0.537
+
+Confidence gate analysis (test set):
+  >= 0.45:  673 signals | WR=56.3%
+  >= 0.5:  387 signals | WR=57.9%
+  >= 0.52:  263 signals | WR=56.7%
+  >= 0.55:  134 signals | WR=62.7%
+  >= 0.58:   71 signals | WR=69.0%
+  >= 0.6:   46 signals | WR=80.4%
+
+Feature Importances:
+  volume_ratio              0.0853
+  bb_width                  0.0779
+  rsi_lag1                  0.0768
+  session                   0.0755
+  dow                       0.0737
+  trend_strength            0.0735
+  return_5                  0.0729
+  body_ratio                0.0702
+  bb_position               0.0688
+  macd_hist                 0.0682
+  atr_pct                   0.0669
+  return_1                  0.0668
+  rsi                       0.0645
+  atr_regime                0.0591
+  momentum_alignment        0.0000
+  vol_spike                 0.0000
+  rsi_extreme               0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.49      0.52      0.51       340
+         Win       0.58      0.55      0.56       407
+
+    accuracy                           0.54       747
+   macro avg       0.54      0.54      0.53       747
+weighted avg       0.54      0.54      0.54       747

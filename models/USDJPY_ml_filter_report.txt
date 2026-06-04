@@ -1,0 +1,42 @@
+=== ML Filter Training Report — USDJPY ===
+Data: C:\Users\david\repos\ai_trading_forex\data\USDJPY_H1_ML.csv
+Samples: 4980 (train=3486, val=747, test=747)
+Test AUC:      0.575
+Test Accuracy: 0.560
+
+Confidence gate analysis (test set):
+  >= 0.45:  696 signals | WR=57.5%
+  >= 0.5:  398 signals | WR=61.3%
+  >= 0.52:   74 signals | WR=71.6%
+  >= 0.55:   50 signals | WR=78.0%
+  >= 0.58:   18 signals | WR=88.9%
+  >= 0.6:    2 signals | WR=50.0%
+
+Feature Importances:
+  volume_ratio              0.0958
+  rsi                       0.0795
+  session                   0.0791
+  atr_pct                   0.0780
+  atr_regime                0.0770
+  return_5                  0.0710
+  return_1                  0.0699
+  dow                       0.0667
+  bb_position               0.0650
+  rsi_lag1                  0.0648
+  trend_strength            0.0639
+  body_ratio                0.0638
+  macd_hist                 0.0638
+  bb_width                  0.0616
+  momentum_alignment        0.0000
+  vol_spike                 0.0000
+  rsi_extreme               0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.50      0.53      0.51       328
+         Win       0.61      0.58      0.60       419
+
+    accuracy                           0.56       747
+   macro avg       0.56      0.56      0.56       747
+weighted avg       0.56      0.56      0.56       747

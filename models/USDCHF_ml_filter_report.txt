@@ -1,0 +1,42 @@
+=== ML Filter Training Report — USDCHF ===
+Data: C:\Users\david\repos\ai_trading_forex\data\USDCHF_H1_ML.csv
+Samples: 4980 (train=3486, val=747, test=747)
+Test AUC:      0.581
+Test Accuracy: 0.545
+
+Confidence gate analysis (test set):
+  >= 0.45:  615 signals | WR=54.0%
+  >= 0.5:  367 signals | WR=56.4%
+  >= 0.52:  241 signals | WR=58.5%
+  >= 0.55:   94 signals | WR=67.0%
+  >= 0.58:   50 signals | WR=74.0%
+  >= 0.6:   40 signals | WR=80.0%
+
+Feature Importances:
+  vol_spike                 0.1259
+  volume_ratio              0.0788
+  session                   0.0671
+  dow                       0.0615
+  bb_position               0.0613
+  return_5                  0.0596
+  rsi                       0.0589
+  macd_hist                 0.0588
+  return_1                  0.0588
+  bb_width                  0.0581
+  body_ratio                0.0579
+  trend_strength            0.0568
+  atr_pct                   0.0523
+  atr_regime                0.0500
+  rsi_lag1                  0.0481
+  rsi_extreme               0.0459
+  momentum_alignment        0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.53      0.56      0.54       360
+         Win       0.56      0.53      0.55       387
+
+    accuracy                           0.54       747
+   macro avg       0.55      0.55      0.54       747
+weighted avg       0.55      0.54      0.54       747

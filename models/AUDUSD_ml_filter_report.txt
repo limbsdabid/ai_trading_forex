@@ -1,0 +1,42 @@
+=== ML Filter Training Report — AUDUSD ===
+Data: C:\Users\david\repos\ai_trading_forex\data\AUDUSD_H1_ML.csv
+Samples: 4980 (train=3486, val=747, test=747)
+Test AUC:      0.547
+Test Accuracy: 0.530
+
+Confidence gate analysis (test set):
+  >= 0.45:  709 signals | WR=49.5%
+  >= 0.5:  312 signals | WR=51.9%
+  >= 0.52:  192 signals | WR=55.2%
+  >= 0.55:  100 signals | WR=60.0%
+  >= 0.58:   57 signals | WR=61.4%
+  >= 0.6:   47 signals | WR=63.8%
+
+Feature Importances:
+  volume_ratio              0.1126
+  macd_hist                 0.0909
+  bb_position               0.0854
+  return_1                  0.0800
+  dow                       0.0770
+  rsi                       0.0768
+  body_ratio                0.0763
+  return_5                  0.0748
+  atr_pct                   0.0710
+  trend_strength            0.0703
+  bb_width                  0.0693
+  rsi_lag1                  0.0679
+  session                   0.0478
+  momentum_alignment        0.0000
+  vol_spike                 0.0000
+  rsi_extreme               0.0000
+  atr_regime                0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.54      0.61      0.57       384
+         Win       0.52      0.45      0.48       363
+
+    accuracy                           0.53       747
+   macro avg       0.53      0.53      0.53       747
+weighted avg       0.53      0.53      0.53       747

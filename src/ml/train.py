@@ -113,7 +113,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df["trend_strength"]     = df[["pct_from_sma20","pct_from_sma50"]].abs().mean(axis=1)
     df["vol_spike"]          = (df["volume_ratio"] > 1.5).astype(int)
     df["rsi_extreme"]        = ((df["rsi"] < 30) | (df["rsi"] > 70)).astype(int)
-    df["atr_regime"]         = pd.qcut(df["atr_pct"], 3, labels=[0,1,2], duplicates="drop").astype(float).astype(int)
+    df["atr_regime"]         = pd.qcut(df["atr_pct"], 3, labels=[0,1,2], duplicates="drop").astype(float).fillna(1).astype(int)
 
     return df
 
@@ -146,7 +146,7 @@ def train(data_path: Path = DATA_PATH, symbol: str = "EURUSD") -> None:
         df["trend_strength"] = df[["pct_from_sma20","pct_from_sma50"]].abs().mean(axis=1)
         df["vol_spike"]      = (df.get("volume_ratio", 1) > 1.5).astype(int)
         df["rsi_extreme"]    = ((df["rsi"] < 30) | (df["rsi"] > 70)).astype(int)
-        df["atr_regime"]     = pd.qcut(df["atr_pct"], 3, labels=[0,1,2], duplicates="drop").astype(float).astype(int)
+        df["atr_regime"]     = pd.qcut(df["atr_pct"], 3, labels=[0,1,2], duplicates="drop").astype(float).fillna(1).astype(int)
         if "macd_hist" not in df.columns and "macd" in df.columns and "macd_signal" in df.columns:
             df["macd_hist"] = df["macd"] - df["macd_signal"]
 

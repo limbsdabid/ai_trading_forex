@@ -1,0 +1,42 @@
+=== ML Filter Training Report — EURUSD ===
+Data: C:\Users\david\repos\ai_trading_forex\data\EURUSD_H1_ML.csv
+Samples: 3560 (train=2492, val=534, test=534)
+Test AUC:      0.608
+Test Accuracy: 0.552
+
+Confidence gate analysis (test set):
+  >= 0.45:  514 signals | WR=42.8%
+  >= 0.5:  201 signals | WR=46.8%
+  >= 0.52:   67 signals | WR=64.2%
+  >= 0.55:   26 signals | WR=80.8%
+  >= 0.58: 0 signals
+  >= 0.6: 0 signals
+
+Feature Importances:
+  trend_strength            0.0959
+  rsi_lag1                  0.0904
+  rsi_extreme               0.0820
+  dow                       0.0809
+  bb_position               0.0721
+  bb_width                  0.0680
+  rsi                       0.0676
+  macd_hist                 0.0616
+  momentum_alignment        0.0614
+  atr_pct                   0.0598
+  atr_regime                0.0591
+  return_5                  0.0548
+  session                   0.0386
+  body_ratio                0.0383
+  volume_ratio              0.0367
+  return_1                  0.0329
+  vol_spike                 0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.60      0.65      0.63       308
+         Win       0.47      0.42      0.44       226
+
+    accuracy                           0.55       534
+   macro avg       0.54      0.53      0.53       534
+weighted avg       0.55      0.55      0.55       534

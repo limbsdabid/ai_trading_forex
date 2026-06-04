@@ -1,0 +1,42 @@
+=== ML Filter Training Report — NZDUSD ===
+Data: C:\Users\david\repos\ai_trading_forex\data\NZDUSD_H1_ML.csv
+Samples: 4980 (train=3486, val=747, test=747)
+Test AUC:      0.485
+Test Accuracy: 0.473
+
+Confidence gate analysis (test set):
+  >= 0.45:  747 signals | WR=47.3%
+  >= 0.5:  395 signals | WR=44.8%
+  >= 0.52:   61 signals | WR=52.5%
+  >= 0.55:   40 signals | WR=57.5%
+  >= 0.58: 0 signals
+  >= 0.6: 0 signals
+
+Feature Importances:
+  volume_ratio              0.1183
+  rsi_lag1                  0.0819
+  rsi                       0.0815
+  momentum_alignment        0.0807
+  dow                       0.0770
+  trend_strength            0.0768
+  bb_position               0.0759
+  body_ratio                0.0757
+  atr_pct                   0.0737
+  return_1                  0.0727
+  return_5                  0.0688
+  bb_width                  0.0640
+  macd_hist                 0.0531
+  session                   0.0000
+  vol_spike                 0.0000
+  rsi_extreme               0.0000
+  atr_regime                0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.50      0.45      0.47       394
+         Win       0.45      0.50      0.47       353
+
+    accuracy                           0.47       747
+   macro avg       0.47      0.47      0.47       747
+weighted avg       0.48      0.47      0.47       747

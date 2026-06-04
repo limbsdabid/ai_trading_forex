@@ -1,0 +1,42 @@
+=== ML Filter Training Report — GBPUSD ===
+Data: C:\Users\david\repos\ai_trading_forex\data\GBPUSD_H1_ML.csv
+Samples: 4980 (train=3486, val=747, test=747)
+Test AUC:      0.563
+Test Accuracy: 0.533
+
+Confidence gate analysis (test set):
+  >= 0.45:  663 signals | WR=49.2%
+  >= 0.5:  384 signals | WR=51.8%
+  >= 0.52:  232 signals | WR=54.7%
+  >= 0.55:  102 signals | WR=59.8%
+  >= 0.58:   53 signals | WR=69.8%
+  >= 0.6:   38 signals | WR=76.3%
+
+Feature Importances:
+  volume_ratio              0.0931
+  trend_strength            0.0784
+  macd_hist                 0.0783
+  bb_position               0.0772
+  return_1                  0.0749
+  atr_pct                   0.0735
+  rsi                       0.0732
+  return_5                  0.0720
+  bb_width                  0.0709
+  body_ratio                0.0664
+  session                   0.0641
+  vol_spike                 0.0617
+  rsi_lag1                  0.0611
+  dow                       0.0551
+  momentum_alignment        0.0000
+  rsi_extreme               0.0000
+  atr_regime                0.0000
+
+Classification Report:
+              precision    recall  f1-score   support
+
+        Loss       0.55      0.52      0.53       384
+         Win       0.52      0.55      0.53       363
+
+    accuracy                           0.53       747
+   macro avg       0.53      0.53      0.53       747
+weighted avg       0.53      0.53      0.53       747
