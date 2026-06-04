@@ -186,7 +186,7 @@ class TradingBot:
 
         result = self.broker.place_order(order)
         if result and result.status == "executed":
-            self.risk_manager.open_trade(sizing)
+            self.risk_manager.open_trade(signal.symbol)   # pass symbol, not sizing
             log.info(
                 f"{side.value.upper()} {signal.symbol} "
                 f"vol={volume} sl={sl_price} "
@@ -210,6 +210,8 @@ class TradingBot:
 
     def _on_trade_closed(self, key: str, exit_price: float, exit_time: str, pnl: float, result: str):
         trade = self._open_trades.pop(key, {})
+        symbol = trade.get('symbol') or key.split('_')[0]
+        self.risk_manager.close_trade(symbol)   # release the symbol slot
         file_exists = TRADE_LOG_PATH.exists()
         TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(TRADE_LOG_PATH, "a", newline="") as f:

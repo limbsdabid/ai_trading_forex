@@ -22,14 +22,28 @@ class RiskManager:
         self.max_daily_risk = max_daily_risk
         self.max_positions = max_positions
         self._daily_risk_used = 0.0
-        self._open_positions = 0
+        self._open_symbols: set[str] = set()   # tracks which symbols have open positions
         self._trades_today = 0
+
+    @property
+    def _open_positions(self) -> int:
+        return len(self._open_symbols)
+
+    def can_trade(self, symbol: str) -> tuple[bool, str]:
+        """Check if a new trade is allowed for this symbol.
+        Returns (allowed, reason) so callers can log why it was blocked."""
+        if symbol.upper() in self._open_symbols:
+            return False, f"{symbol}: already has an open position"
+        if self._open_positions >= self.max_positions:
+            return False, f"{symbol}: max positions reached ({self.max_positions})"
+        if self._daily_risk_used >= self.max_daily_risk:
+            return False, f"{symbol}: daily risk limit reached ({self.max_daily_risk*100:.0f}%)"
+        return True, ""
 
     def calculate_size(self, entry_price: float, stop_loss: float,
                        symbol: str) -> Optional[TradeSizing]:
-        if self._open_positions >= self.max_positions:
-            return None
-        if self._daily_risk_used >= self.max_daily_risk:
+        allowed, reason = self.can_trade(symbol)
+        if not allowed:
             return None
 
         risk_amount = self.account_balance * self.risk_per_trade
@@ -58,13 +72,13 @@ class RiskManager:
             entry_price=round(entry_price, 5),
         )
 
-    def open_trade(self, sizing: TradeSizing):
-        self._open_positions += 1
+    def open_trade(self, symbol: str):
+        self._open_symbols.add(symbol.upper())
         self._trades_today += 1
         self._daily_risk_used += self.risk_per_trade
 
-    def close_trade(self):
-        self._open_positions = max(0, self._open_positions - 1)
+    def close_trade(self, symbol: str):
+        self._open_symbols.discard(symbol.upper())
 
     def reset_daily(self):
         self._daily_risk_used = 0.0
