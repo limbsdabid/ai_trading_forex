@@ -3,7 +3,7 @@
 > **Project:** AI-powered Forex trading bot using Smart Money Concepts (SMC) + Machine Learning  
 > **Broker:** VantageMarkets Demo (MT5)  
 > **Account:** 11210667  
-> **Last Update:** June 2, 2026
+> **Last Update:** June 4, 2026
 
 ---
 
@@ -21,14 +21,17 @@
 10. [Phase 10: Main Trading Bot Loop](#phase-10-main-trading-bot-loop)
 11. [Phase 11: Machine Learning Research](#phase-11-machine-learning-research)
 12. [Phase 12: Bug Fixes & Issues Resolved](#phase-12-bug-fixes--issues-resolved)
-13. [Phase 13: Latest Status (June 2, 2026)](#phase-13-latest-status-june-2-2026)
-14. [Next Steps](#next-steps)
+13. [Phase 13: Multi-Pair ML Filter (June 4, 2026)](#phase-13-multi-pair-ml-filter-june-4-2026)
+14. [Phase 14: Per-Symbol Thresholds & Risk Fixes (June 4, 2026)](#phase-14-per-symbol-thresholds--risk-fixes-june-4-2026)
+15. [Latest Status (June 4, 2026)](#latest-status-june-4-2026)
+16. [Next Steps](#next-steps)
 
 ---
 
 ## Phase 1: Project Setup & Environment
 
 ### Accomplished
+
 - Created Python 3.12 virtual environment (`venv/`)
 - Installed all dependencies: `pandas`, `numpy`, `MetaTrader5`, `ta`, `rich`, `python-dotenv`, `schedule`, `python-telegram-bot`
 - Created `.env` configuration file with MT5 credentials and bot settings
@@ -37,13 +40,15 @@
 - Configured VS Code settings (`interpreter` pointing to venv)
 
 ### Key Files
-| File | Purpose |
-|------|---------|
-| `requirements.txt` | Python package list |
-| `.env` | Live config: MT5 login, risk settings, bot params |
-| `.vscode/settings.json` | IDE configuration |
+
+| File                    | Purpose                                           |
+| ----------------------- | ------------------------------------------------- |
+| `requirements.txt`      | Python package list                               |
+| `.env`                  | Live config: MT5 login, risk settings, bot params |
+| `.vscode/settings.json` | IDE configuration                                 |
 
 ### Current `.env` Values
+
 ```
 MT5_LOGIN=11210667
 MT5_SERVER=VantageMarkets-Demo
@@ -58,6 +63,7 @@ SCAN_INTERVAL=5 (minutes)
 ## Phase 2: Data Module
 
 ### Accomplished
+
 - Built `DataProvider` class (`src/data/provider.py`) with:
   - **MT5 connectivity** — automatic login, symbol selection, rate fetching
   - **Timeframe mapping** — supports M1, M5, M15, M30, H1, H4, D1, W1
@@ -67,165 +73,96 @@ SCAN_INTERVAL=5 (minutes)
 - Created `src/data/__init__.py` for clean imports
 
 ### Files Created
-| File | Lines |
-|------|-------|
-| `src/data/__init__.py` | Exports |
-| `src/data/provider.py` | 127 lines — core data fetching logic |
 
-### How It Works
-```
-main.py → DataProvider.fetch_rates(symbol, timeframe, bars)
-         ├── if MT5 connected → _fetch_mt5() → MetaTrader5 API
-         └── if not connected → _fetch_simulated() → random walk
-```
+| File                   | Lines                                |
+| ---------------------- | ------------------------------------ |
+| `src/data/__init__.py` | Exports                              |
+| `src/data/provider.py` | 127 lines — core data fetching logic |
 
 ---
 
 ## Phase 3: Strategy Framework & Indicators
 
 ### Accomplished
+
 - Created abstract `Strategy` base class (`src/strategies/base.py`) with:
   - `generate_signal(data, symbol)` — abstract method
   - `add_indicators(df)` — adds SMA 20/50, EMA 12/26, RSI, MACD, Bollinger Bands, ATR
-  - Indicator helper methods: `_rsi()`, `_macd()`, `_bollinger()`, `_atr()`
 - Defined `Signal` dataclass and `SignalType` enum (BUY, SELL, HOLD, CLOSE_BUY, CLOSE_SELL)
-- Created `src/strategies/__init__.py`
-
-### Files Created
-| File | Lines |
-|------|-------|
-| `src/strategies/base.py` | 84 lines |
-| `src/strategies/__init__.py` | Exports |
 
 ---
 
 ## Phase 4: MA Crossover Strategy
 
 ### Accomplished
-- Built `MACrossoverStrategy` (`src/strategies/ma_crossover.py`) as backup strategy
-- Logic: SMA 20 crosses above SMA 50 → BUY (with RSI > 30), opposite → SELL (with RSI < 70)
-- Registered in main bot (can be toggled on/off)
 
-### Files Created
-| File | Lines |
-|------|-------|
-| `src/strategies/ma_crossover.py` | 62 lines |
+- Built `MACrossoverStrategy` as backup strategy
+- Logic: SMA 20 crosses above SMA 50 → BUY (RSI > 30), opposite → SELL (RSI < 70)
 
 ---
 
 ## Phase 5: SMC Strategy — H4 Bias Engine
 
 ### Accomplished (Notebook: `05_smc_bias_engine.ipynb`)
-- Developed H4 bias detection logic:
-  - `find_swings()` — identifies swing highs/lows using local extrema over 5-bar window
-  - `get_h4_bias()` — compares current close to last 2 swing points
-    - Close above previous swing high → **bullish**
-    - Close below previous swing low → **bearish**
-    - Otherwise → **neutral**
-- Handles edge cases: insufficient data (<10 bars), fewer than 2 swings
 
-### Code Location
-`src/strategies/smc_strategy.py` → `find_swings()` (line 16), `get_h4_bias()` (line 25)
+- `find_swings()` — swing highs/lows over 5-bar window
+- `get_h4_bias()` — bullish / bearish / neutral based on last 2 swing comparisons
 
 ---
 
 ## Phase 6: SMC Strategy — M15 Zone Finder
 
 ### Accomplished (Notebook: `06_smc_zone_finder.ipynb`)
-- Developed M15 zone detection:
-  - `find_zones()` — identifies:
-    - **Fair Value Gaps (FVGs)** — 3-candle gap where body of candle 3 does not overlap candle 1
-    - **Order Blocks (OBs)** — last bearish/bullish candle before an impulse move
-  - `get_confluence()` — matches OBs and FVGs within distance threshold, filtered by H4 bias
-- Returns confluent zones (OB + FVG aligned) with top/bot/mid prices
 
-### Code Location
-`src/strategies/smc_strategy.py` → `find_zones()` (line 41), `get_confluence()` (line 60)
+- `find_zones()` — Fair Value Gaps (FVGs) + Order Blocks (OBs)
+- `get_confluence()` — OB + FVG overlap filtered by H4 bias
 
 ---
 
 ## Phase 7: SMC Strategy — M5 Entry Trigger (CHoCH)
 
 ### Accomplished (Notebook: `07_smc_entry_trigger.ipynb`)
-- Developed M5 entry trigger:
-  - `detect_choch_m5()` — detects **Change of Character (CHoCH)**:
-    - **Bullish CHoCH:** Higher lows → price breaks above previous swing high
-    - **Bearish CHoCH:** Lower highs → price breaks below previous swing low
-  - `get_next_liquidity()` — finds next liquidity level for TP targeting
-- Full signal generation in `SMCStrategy.generate_signal()`:
-  1. Fetch H4, M15, M5 data
-  2. Check H4 bias (skip if neutral)
-  3. Find M15 confluent zones (skip if none)
-  4. Check if price is inside a recent zone (skip if not)
-  5. Confirm M5 CHoCH trigger (skip if no CHoCH)
-  6. Calculate SL (below/above swing point), TP (next liquidity)
-  7. Calculate position size via risk manager
-  8. Return BUY/SELL signal with metadata
 
-### Files Created
-| File | Lines |
-|------|-------|
-| `src/strategies/smc_strategy.py` | 205 lines |
+- `detect_choch_m5()` — Change of Character detection (higher lows / lower highs break)
+- `get_next_liquidity()` — TP targeting via next liquidity level
+- Full `SMCStrategy.generate_signal()` pipeline:
+  1. H4 bias check (skip if neutral)
+  2. M15 confluent zones (skip if none)
+  3. Price inside zone check
+  4. M5 CHoCH confirmation
+  5. SL from swing ±1 pip, TP from liquidity or 2:1 RR fallback
+  6. Position size via RiskManager
 
 ---
 
 ## Phase 8: Risk Management Module
 
-### Accomplished (Notebook: `08_risk_management.ipynb`)
-- Built `RiskManager` class (`src/risk/manager.py`) with:
-  - **Position sizing** — `calculate_size(entry, stop, symbol)`
-    - Risk amount = balance × risk_per_trade (1% default)
-    - Volume = risk_amount / (sl_pips × 10)
-    - Volume normalized to 0.01 step
-    - Returns None if max positions reached or daily risk exceeded
-  - **Daily risk tracking** — `max_daily_risk` (6% default), auto-resets at midnight
-  - **Trade counting** — `open_trade()`, `close_trade()`
-  - **Pip value** — adjusts for JPY vs non-JPY pairs
-  - `TradeSizing` dataclass with computed volume, SL, TP, risk amount
+### Accomplished
 
-### Files Created
-| File | Lines |
-|------|-------|
-| `src/risk/__init__.py` | Exports |
-| `src/risk/manager.py` | 85 lines |
+- `RiskManager` — 1% risk per trade, 6% daily max, 5 max open positions
+- Pip value adjustment for JPY pairs
+- `TradeSizing` dataclass
 
 ---
 
 ## Phase 9: Paper Broker / Execution Module
 
 ### Accomplished
-- Built `PaperBroker` class (`src/execution/broker.py`) with:
-  - **Order management** — `place_order()` with auto-ID, balance check, execution
-  - **Position tracking** — dictionary-based with volume averaging for additions
-  - **Position closing** — `close_position()` with P&L calculation
-  - **Price updates** — `update_prices()` for unrealized P&L
-  - **Order/Position dataclasses** — Order, Position, OrderType, OrderSide enums
-  - Mock price generator for simulated fills
 
-### Files Created
-| File | Lines |
-|------|-------|
-| `src/execution/broker.py` | 150 lines |
-| `src/execution/__init__.py` | Exports |
+- `PaperBroker` — simulated orders with spread + slippage (realistic fills)
+- Position tracking, P&L calculation, auto SL/TP closing via live MT5 prices
+- `LiveBroker` stub for future real MT5 execution
 
 ---
 
 ## Phase 10: Main Trading Bot Loop
 
 ### Accomplished
-- Built `TradingBot` class (`main.py`) with:
-  - **Startup** — MT5 connection, account sync (balance, equity, server info)
-  - **Scan cycle** — iterates all symbols, fetches M5 data, runs strategies
-  - **Signal execution** — maps `SignalType` to OrderSide, validates risk limits
-  - **Trade logging** — CSV log at `logs/trades.csv` with timestamp/symbol/entry/SL/TP/volume
-  - **Position display** — Rich table with symbol, side, volume, entry, current price, P&L, SL, TP
-  - **Scan interval** — configurable sleep between cycles (default 5 min)
-  - **Graceful shutdown** — KeyboardInterrupt handling, MT5 disconnect
 
-### Files Created
-| File | Lines |
-|------|-------|
-| `main.py` | 237 lines |
+- `TradingBot` in `main.py` — 5-minute scan cycle over 7 pairs
+- Signal execution, trade logging to `logs/trades.csv`
+- Rich console table for live positions + P&L
+- Graceful shutdown, daily reset, Telegram notifications
 
 ---
 
@@ -233,107 +170,196 @@ main.py → DataProvider.fetch_rates(symbol, timeframe, bars)
 
 ### Accomplished (12 Jupyter Notebooks)
 
-| # | Notebook | Purpose | Key Finding |
-|---|----------|---------|-------------|
-| 01 | `01_data_exploration.ipynb` | Fetch & visualize MT5 data | Price patterns, volatility analysis |
-| 02 | `02_feature_engineering.ipynb` | Create ML features | Indicators + lags → 35+ features |
-| 03 | `03_model_training.ipynb` | Train Random Forest | Baseline model for direction prediction |
-| 04 | `04_h4_xgboost.ipynb` | XGBoost on H4 data | Gradient boosting for H4 signals |
-| 05 | `05_backtest.ipynb` | Backtest with spread/slippage | Realistic simulation with costs |
-| 06 | `05_smc_bias_engine.ipynb` | H4 bias detection | Swing highs/lows + BOS/CHoCH logic |
-| 07 | `06_lstm_model.ipynb` | LSTM price prediction | Deep learning sequence model |
-| 08 | `06_smc_zone_finder.ipynb` | M15 OB/FVG finder | Order Block + Fair Value Gap detection |
-| 09 | `07_smc_entry_trigger.ipynb` | M5 CHoCH trigger | Change of Character entry logic |
-| 10 | `08_risk_management.ipynb` | Position sizing | Kelly criterion, fixed %, volatility-based |
-| 11 | `09_smc_backtest.ipynb` | Walk-forward SMC backtest | End-to-end SMC system validation |
-| 12 | `10_ml_filter.ipynb` | XGBoost signal filter | ML filter on SMC signals to predict win/loss |
-
-### ML Data
-- **File:** `data/EURUSD_H1_ML.csv` (3,561 rows, ~2.1 MB)
-- **Features:** Price data + SMA 10/20/50, EMA 12/26, RSI, MACD, Bollinger Bands, ATR, returns, body/wick ratios, volume ratios, lags
-- **Target:** Binary directional prediction
+| #   | Notebook                       | Purpose                           |
+| --- | ------------------------------ | --------------------------------- |
+| 01  | `01_data_exploration.ipynb`    | Fetch & visualize MT5 data        |
+| 02  | `02_feature_engineering.ipynb` | Create ML features (35+ features) |
+| 03  | `03_model_training.ipynb`      | Train Random Forest baseline      |
+| 04  | `04_h4_xgboost.ipynb`          | XGBoost on H4 data                |
+| 05  | `05_backtest.ipynb`            | Backtest with spread/slippage     |
+| 06  | `05_smc_bias_engine.ipynb`     | H4 bias research                  |
+| 07  | `06_lstm_model.ipynb`          | LSTM price prediction             |
+| 08  | `06_smc_zone_finder.ipynb`     | M15 OB/FVG research               |
+| 09  | `07_smc_entry_trigger.ipynb`   | M5 CHoCH research                 |
+| 10  | `08_risk_management.ipynb`     | Position sizing research          |
+| 11  | `09_smc_backtest.ipynb`        | Walk-forward SMC backtest         |
+| 12  | `10_ml_filter.ipynb`           | XGBoost signal filter (EURUSD)    |
+| 13  | `11_export_pairs_data.ipynb`   | Export H1 ML data for all 7 pairs |
 
 ---
 
 ## Phase 12: Bug Fixes & Issues Resolved
 
 ### Bug #1: "No data for [symbol], skipping"
+
 **Date:** May 31, 2026  
-**Symptom:** Bot connected to MT5 successfully but all 7 symbols returned no data  
-**Root Cause:** MT5 symbol selection timing — symbols need time to initialize after login  
-**Fix Applied:** Added `time.sleep(1)` after `mt5.login()` and `time.sleep(0.5)` in `_fetch_mt5()` before `copy_rates_from_pos()`  
-**Result:** Bot successfully fetches live data for all 7 pairs
+**Fix:** Added `time.sleep(1)` after MT5 login and `time.sleep(0.5)` before `copy_rates_from_pos()`
 
-### Bug #2: Scan Interval Display (300 minutes)
-**Date:** June 2, 2026 (08:33)  
-**Symptom:** Log showed "Next scan in 300 minutes"  
-**Root Cause:** `SCAN_INTERVAL` was set to 300 in `.env` (likely during testing)  
-**Fix Applied:** Changed `SCAN_INTERVAL=5` in `.env`  
-**Result:** Scan interval reduced to 5 minutes (last log: "Next scan in 5 minutes")  
-**Lesson:** No validation/enforcement of max scan interval — added to future improvements list
+### Bug #2: Scan Interval showing 300 minutes
 
-### Bug #3: Account Balance Fluctuation
-**Date:** May 31 → June 2  
-**Observation:** Balance dropped from $4,654.85 → $4,478.57 (loss of ~$176.28)  
-**Root Cause:** Paper trades incurred losses over the weekend gap and open positions  
-**Status:** Under monitoring — expected in live trading; risk management is working as designed (1% risk per trade)
+**Date:** June 2, 2026  
+**Fix:** Changed `SCAN_INTERVAL=5` in `.env`
+
+### Bug #3: `atr_regime` NaN crash during multi-pair training
+
+**Date:** June 4, 2026  
+**Symptom:** `Cannot convert non-finite values (NA or inf) to integer` for 6 of 7 pairs  
+**Root Cause:** New CSVs had NaN in `atr_pct` column (ATR warmup rows) — `pd.qcut().astype(int)` crashed  
+**Fix:** Added `.fillna(1)` before `.astype(int)` in both `add_features()` and the `else` branch of `train.py`
+
+### Bug #4: `_open_positions` counter never updating
+
+**Date:** June 4, 2026  
+**Symptom:** RiskManager always allowed new trades regardless of open positions  
+**Root Cause:** `open_trade(sizing)` was never called after a successful order; counter stayed at 0  
+**Fix:** Replaced single int counter with `_open_symbols: set[str]`; `open_trade(symbol)` adds to set, `close_trade(symbol)` removes — called correctly in `_execute_signal()` and `_on_trade_closed()`
 
 ---
 
-## Phase 13: Latest Status (June 2, 2026)
+## Phase 13: Multi-Pair ML Filter (June 4, 2026)
+
+### Problem
+
+Original ML filter (`ml_filter.pkl`) was trained on EURUSD only. All 7 pairs were using the same EURUSD model — inaccurate for other pairs.
+
+### Solution — Option A: Per-Symbol Models
+
+Each pair gets its own XGBoost model trained on its own H1 data.
+
+### Changes Made
+
+**`11_export_pairs_data.ipynb`** — exported 4,980–5,000 rows of H1 ML data for all 6 remaining pairs:
+
+- `data/GBPUSD_H1_ML.csv`
+- `data/USDJPY_H1_ML.csv`
+- `data/USDCHF_H1_ML.csv`
+- `data/AUDUSD_H1_ML.csv`
+- `data/USDCAD_H1_ML.csv`
+- `data/NZDUSD_H1_ML.csv`
+
+**`src/ml/train.py`** — updated to support multi-symbol training:
+
+- `train(data_path, symbol)` — trains one model, saves `models/{SYMBOL}_ml_filter.pkl`
+- `train_all()` — loops all 7 pairs automatically
+- Usage: `python src/ml/train.py` (all) | `python src/ml/train.py GBPUSD` (one)
+- Backward compat: `models/ml_filter.pkl` kept in sync with EURUSD model
+
+**`src/ml/filter.py`** — updated `MLFilter` class:
+
+- `MLFilter(symbol="EURUSD")` — loads `{SYMBOL}_ml_filter.pkl`
+- `_model_paths(symbol)` — falls back to generic model if per-symbol pkl missing
+
+**`src/strategies/smc_strategy.py`** — per-symbol filter cache:
+
+- `self._ml_filters: dict[str, MLFilter]` — lazy-loaded per pair on first use
+- `_get_threshold(symbol)` — looks up per-symbol threshold
+
+### Training Results
+
+| Symbol | AUC   | Best Threshold | WR @ Threshold                  |
+| ------ | ----- | -------------- | ------------------------------- |
+| EURUSD | 0.608 | 0.55           | 80.8% (26 signals)              |
+| GBPUSD | 0.563 | 0.60           | 76.3% (38 signals)              |
+| USDJPY | 0.575 | 0.55           | 78.0% (50 signals)              |
+| USDCHF | 0.581 | 0.58           | 74.0% (50 signals)              |
+| AUDUSD | 0.547 | 0.60           | 63.8% (47 signals)              |
+| USDCAD | 0.551 | 0.60           | 80.4% (46 signals)              |
+| NZDUSD | 0.485 | 0.52           | 52.5% (61 signals) — weak model |
+
+> NZDUSD AUC below 0.50 — model is near-random. Kept active at low threshold (0.52) pending more data and retraining.
+
+---
+
+## Phase 14: Per-Symbol Thresholds & Risk Fixes (June 4, 2026)
+
+### Per-Symbol ML Thresholds
+
+**`src/config.py`** — replaced single `ml_threshold` with `ml_thresholds` dict:
+
+```python
+ml_thresholds = {
+    "EURUSD": 0.55,
+    "GBPUSD": 0.60,
+    "USDJPY": 0.55,
+    "USDCHF": 0.58,
+    "AUDUSD": 0.60,
+    "USDCAD": 0.60,
+    "NZDUSD": 0.52,
+}
+```
+
+- `get_threshold(symbol)` helper method added
+- Fallback default `ml_threshold=0.55` kept for `.env` compatibility
+
+**`src/strategies/smc_strategy.py`** — `_get_threshold(symbol)` uses per-symbol dict with fallback
+
+**`main.py`** — passes `ml_thresholds=config.ml_thresholds` into `SMCStrategy`
+
+### Per-Symbol Position Tracking Fix
+
+**`src/risk/manager.py`** — replaced int counter with symbol-aware set:
+
+- `_open_symbols: set[str]` — tracks which pairs have open positions
+- `can_trade(symbol)` — returns `(bool, reason)` for transparent blocking
+- `open_trade(symbol)` — adds symbol to set
+- `close_trade(symbol)` — removes symbol from set
+- Behavior: each pair can hold 1 position independently; max 5 pairs simultaneously
+
+**`main.py`** — fixed `open_trade()` and `close_trade()` call sites
+
+### Trade Flow (Sequential Scan)
+
+Every 5 minutes, the bot scans pairs in order: EURUSD → GBPUSD → USDJPY → USDCHF → AUDUSD → USDCAD → NZDUSD. Each pair goes through:
+
+1. SMC gates (H4 bias → M15 zone → in zone → M5 CHoCH)
+2. ML filter gate (per-symbol model + threshold)
+3. Position check (symbol not in `_open_symbols`, total < 5)
+4. Order placement + `open_trade(symbol)`
+
+On close (SL/TP hit): `close_trade(symbol)` releases the slot.
+
+---
+
+## Latest Status (June 4, 2026)
 
 ### What's Working
+
 - ✅ MT5 connection & authentication to VantageMarkets Demo
-- ✅ Live price fetching for all 7 major pairs
-- ✅ Paper trading (simulated orders with position tracking)
-- ✅ SMC strategy pipeline: H4 bias → M15 zones → M5 CHoCH entry
-- ✅ Risk management: 1% per trade, 5% daily max, 5 max positions
-- ✅ Trade logging to CSV
-- ✅ Console display of open positions with P&L
-- ✅ Configurable scan interval (currently 5 min)
+- ✅ Live price fetching for all 7 major pairs (H4, M15, M5, H1)
+- ✅ Paper trading with realistic spread + slippage fills
+- ✅ SMC strategy: H4 bias → M15 OB/FVG zones → M5 CHoCH entry
+- ✅ Per-symbol XGBoost ML filter (7 separate models)
+- ✅ Per-symbol ML thresholds tuned to training results
+- ✅ Per-symbol position tracking (each pair independent, max 5 total)
+- ✅ 1% risk per trade, 6% daily max
+- ✅ SL from swing ±1 pip, TP from liquidity or 2:1 RR
+- ✅ Trade logging to `logs/trades.csv`
+- ✅ Rich console display of positions + P&L
+- ✅ Telegram notifications (trade open/close + daily summary)
 - ✅ Graceful shutdown (Ctrl+C)
 
-### Latest Bot Log (08:45 AM, June 2)
-```
-EURUSD: 1.16315
-GBPUSD: 1.34562
-USDJPY: 159.686
-USDCHF: 0.78667
-AUDUSD: 0.71601
-USDCAD: 1.38432
-NZDUSD: 0.59246
-Next scan in 5 minutes
-```
+### Models
 
-### Account Status
-- **Balance:** $4,478.57
-- **Server:** VantageMarkets-Demo
-- **Mode:** Paper Trading (PAPER_TRADING=true)
-- **Login:** 11210667
-
-### Files Summary
-| File | Lines | Status |
-|------|-------|--------|
-| `main.py` | 237 | ✅ Running |
-| `src/config.py` | 47 | ✅ Complete |
-| `src/data/provider.py` | 127 | ✅ Complete |
-| `src/execution/broker.py` | 150 | ✅ Complete |
-| `src/risk/manager.py` | 85 | ✅ Complete |
-| `src/strategies/base.py` | 84 | ✅ Complete |
-| `src/strategies/smc_strategy.py` | 205 | ✅ Complete |
-| `src/strategies/ma_crossover.py` | 62 | ✅ Complete |
-| `src/utils/logger.py` | 34 | ✅ Complete |
-| **Total** | **~1,031** | |
+| File                          | Description                             |
+| ----------------------------- | --------------------------------------- |
+| `models/EURUSD_ml_filter.pkl` | EURUSD XGBoost model (AUC 0.608)        |
+| `models/GBPUSD_ml_filter.pkl` | GBPUSD XGBoost model (AUC 0.563)        |
+| `models/USDJPY_ml_filter.pkl` | USDJPY XGBoost model (AUC 0.575)        |
+| `models/USDCHF_ml_filter.pkl` | USDCHF XGBoost model (AUC 0.581)        |
+| `models/AUDUSD_ml_filter.pkl` | AUDUSD XGBoost model (AUC 0.547)        |
+| `models/USDCAD_ml_filter.pkl` | USDCAD XGBoost model (AUC 0.551)        |
+| `models/NZDUSD_ml_filter.pkl` | NZDUSD XGBoost model (AUC 0.485) — weak |
+| `models/ml_filter.pkl`        | Backward-compat copy of EURUSD model    |
 
 ---
 
 ## Next Steps
 
-- [ ] **Unit tests** — create test suite under `tests/`
-- [ ] **Live MT5 execution** — `LiveBroker` class for real order placement
-- [ ] **Telegram notifications** — integrate `python-telegram-bot` for trade alerts
-- [ ] **ML filter integration** — connect XGBoost model to filter SMC signals
-- [ ] **Max scan interval validation** — add cap to prevent accidental high values
-- [ ] **Post-trade analysis** — store trade outcomes for ML retraining
-- [ ] **Docker containerization** — for deployment
-- [ ] **Git init** — initialize repository for version control
+- [ ] **Session filter** — hard gate per pair (USDJPY → Asian+London only, GBPUSD → London+NY only)
+- [ ] **Backtest 7 pairs** — run `09_smc_backtest.ipynb` with new per-symbol ML filter
+- [ ] **Re-export EURUSD data** — currently 3,560 rows vs 4,980 for other pairs; normalize to 5,000
+- [ ] **NZDUSD retraining** — collect more data, retrain when AUC improves above 0.52
+- [ ] **Dashboard / monitoring** — Streamlit or Flask UI reading from `logs/trades.csv`
+- [ ] **Walk-forward validation** — rolling train/test for more realistic performance estimates
+- [ ] **Model retraining scheduler** — monthly auto-retrain to prevent model drift
+- [ ] **Live broker** — activate `LiveBroker` for real MT5 order placement when ready
