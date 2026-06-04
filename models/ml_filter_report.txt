@@ -1,4 +1,4 @@
-=== ML Filter Training Report ===
+=== ML Filter Training Report — EURUSD ===
 Data: C:\Users\david\repos\ai_trading_forex\data\EURUSD_H1_ML.csv
 Samples: 3560 (train=2492, val=534, test=534)
 Test AUC:      0.608
