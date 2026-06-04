@@ -48,6 +48,7 @@ class TradingBot:
                 risk_manager=self.risk_manager,
                 data_provider=self.data_provider,
                 ml_threshold=config.ml_threshold,
+                ml_thresholds=config.ml_thresholds,
             ),
         ]
         self.broker.on_close = self._on_trade_closed
