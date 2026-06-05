@@ -58,48 +58,99 @@ def find_zones(df, min_gap=0.00005, impulse_min=0.0010):
     return df_o, df_f
 
 
-def get_confluence(obs, fvg, bias, max_dist=0.0005):
-    if len(obs) == 0 or len(fvg) == 0:
-        return pd.DataFrame()
+def get_confluence(obs, fvg, bias, max_dist=0.0020):
+    """
+    Find zones where Order Blocks and FVGs align.
+    max_dist: max mid-to-mid distance to count as confluence (0.0020 = 20 pips).
+    Falls back to OB-only zones if no OB+FVG confluence found.
+    """
     if bias != 'neutral':
         obs = obs[obs['d'] == bias].copy() if len(obs) > 0 else pd.DataFrame()
         fvg = fvg[fvg['d'] == bias].copy() if len(fvg) > 0 else pd.DataFrame()
+
     zones = []
-    for _, o in obs.iterrows():
-        for _, f in fvg.iterrows():
-            if o['d'] != f['d']:
-                continue
-            if abs(o['mid'] - f['mid']) <= max_dist:
-                zones.append({'t': max(o['t'], f['t']), 'd': o['d'], 'top': max(o['top'],f['top']), 'bot': min(o['bot'],f['bot']), 'mid': (max(o['top'],f['top'])+min(o['bot'],f['bot']))/2})
+
+    # Primary: OB + FVG confluence
+    if len(obs) > 0 and len(fvg) > 0:
+        for _, o in obs.iterrows():
+            for _, f in fvg.iterrows():
+                if o['d'] != f['d']:
+                    continue
+                if abs(o['mid'] - f['mid']) <= max_dist:
+                    zones.append({
+                        't':   max(o['t'], f['t']),
+                        'd':   o['d'],
+                        'top': max(o['top'], f['top']),
+                        'bot': min(o['bot'], f['bot']),
+                        'mid': (max(o['top'], f['top']) + min(o['bot'], f['bot'])) / 2,
+                        'type': 'confluence',
+                    })
+
+    # Fallback: OB-only zones (still high-quality SMC zones)
+    if len(zones) == 0 and len(obs) > 0:
+        for _, o in obs.iterrows():
+            zones.append({
+                't':   o['t'],
+                'd':   o['d'],
+                'top': o['top'],
+                'bot': o['bot'],
+                'mid': o['mid'],
+                'type': 'ob_only',
+            })
+
     return pd.DataFrame(zones).sort_values('t') if zones else pd.DataFrame()
 
 
 def detect_choch_m5(m5_avail, bias):
+    """
+    Detect Change of Character (CHoCH) or Break of Structure (BOS) on M5.
+
+    CHoCH = higher lows (bullish) or lower highs (bearish) + structure break
+    BOS   = simpler: price just breaks above/below the most recent swing point
+            (used as fallback when full CHoCH pattern not yet formed)
+    """
     if len(m5_avail) < 20:
         return False
     highs, lows = find_swings(m5_avail)
 
-    if bias == 'bullish' and len(lows) >= 3:
-        # True higher lows: each successive low must be HIGHER than the previous
-        hl1 = lows['p'].iloc[-3]  # oldest
-        hl2 = lows['p'].iloc[-2]  # middle
-        hl3 = lows['p'].iloc[-1]  # newest
-        if hl2 > hl1 and hl3 > hl2:  # ascending lows = bullish structure
-            # Confirm: price breaks above a recent swing high (CHoCH break)
-            recent_highs = highs[highs['t'] > lows['t'].iloc[-2]]
-            if len(recent_highs) > 0 and m5_avail['high'].iloc[-1] > recent_highs['p'].iloc[-1]:
-                return True
+    if bias == 'bullish':
+        # CHoCH: 3 ascending lows + break above swing high
+        if len(lows) >= 3:
+            hl1 = lows['p'].iloc[-3]
+            hl2 = lows['p'].iloc[-2]
+            hl3 = lows['p'].iloc[-1]
+            if hl2 > hl1 and hl3 > hl2:
+                recent_highs = highs[highs['t'] > lows['t'].iloc[-2]]
+                if len(recent_highs) > 0 and m5_avail['high'].iloc[-1] > recent_highs['p'].iloc[-1]:
+                    return True
 
-    elif bias == 'bearish' and len(highs) >= 3:
-        # True lower highs: each successive high must be LOWER than the previous
-        lh1 = highs['p'].iloc[-3]  # oldest
-        lh2 = highs['p'].iloc[-2]  # middle
-        lh3 = highs['p'].iloc[-1]  # newest
-        if lh2 < lh1 and lh3 < lh2:  # descending highs = bearish structure
-            # Confirm: price breaks below a recent swing low (CHoCH break)
-            recent_lows = lows[lows['t'] > highs['t'].iloc[-2]]
-            if len(recent_lows) > 0 and m5_avail['low'].iloc[-1] < recent_lows['p'].iloc[-1]:
-                return True
+        # BOS fallback: price simply breaks above the most recent swing high
+        if len(highs) >= 2 and len(lows) >= 1:
+            last_high = highs['p'].iloc[-1]
+            last_low  = lows['p'].iloc[-1]
+            # Only trigger if last low is relatively recent (within 30 bars)
+            if highs['t'].iloc[-1] > lows['t'].iloc[-1]:
+                if m5_avail['high'].iloc[-1] > last_high:
+                    return True
+
+    elif bias == 'bearish':
+        # CHoCH: 3 descending highs + break below swing low
+        if len(highs) >= 3:
+            lh1 = highs['p'].iloc[-3]
+            lh2 = highs['p'].iloc[-2]
+            lh3 = highs['p'].iloc[-1]
+            if lh2 < lh1 and lh3 < lh2:
+                recent_lows = lows[lows['t'] > highs['t'].iloc[-2]]
+                if len(recent_lows) > 0 and m5_avail['low'].iloc[-1] < recent_lows['p'].iloc[-1]:
+                    return True
+
+        # BOS fallback: price simply breaks below the most recent swing low
+        if len(lows) >= 2 and len(highs) >= 1:
+            last_low  = lows['p'].iloc[-1]
+            last_high = highs['p'].iloc[-1]
+            if lows['t'].iloc[-1] > highs['t'].iloc[-1]:
+                if m5_avail['low'].iloc[-1] < last_low:
+                    return True
 
     return False
 
@@ -165,7 +216,7 @@ class SMCStrategy(Strategy):
 
         # Gate 4: Price in Zone
         price = m5['close'].iloc[-1]
-        recent_zones = zones[zones['t'] >= m15.index[-20]]
+        recent_zones = zones[zones['t'] >= m15.index[-100]]  # ~25 hours window
         in_zone = False
         for _, z in recent_zones.iterrows():
             if z['bot'] <= price <= z['top']:
