@@ -82,7 +82,8 @@ class DataProvider:
     def _fetch_mt5(self, symbol: str, mt5_tf: int, bars: int) -> Optional[PriceData]:
         try:
             import MetaTrader5 as mt5
-            mt5.symbol_select(symbol, True)
+            if not mt5.symbol_select(symbol, True):
+                return None
             import time
             time.sleep(0.5)
             rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, bars)

@@ -21,7 +21,7 @@ class RiskManager:
         self.risk_per_trade = risk_per_trade
         self.max_daily_risk = max_daily_risk
         self.max_positions = max_positions
-        self._daily_risk_used = 0.0
+        self._daily_realized_pnl = 0.0  # Track realized P&L, not just trade count
         self._open_symbols: set[str] = set()   # tracks which symbols have open positions
         self._trades_today = 0
 
@@ -36,8 +36,9 @@ class RiskManager:
             return False, f"{symbol}: already has an open position"
         if self._open_positions >= self.max_positions:
             return False, f"{symbol}: max positions reached ({self.max_positions})"
-        if self._daily_risk_used >= self.max_daily_risk:
-            return False, f"{symbol}: daily risk limit reached ({self.max_daily_risk*100:.0f}%)"
+        # Check daily realized loss (only block if losing more than max_daily_risk)
+        if self._daily_realized_pnl < -(self.account_balance * self.max_daily_risk):
+            return False, f"{symbol}: daily loss limit exceeded ({abs(self._daily_realized_pnl):.2f})"
         return True, ""
 
     def calculate_size(self, entry_price: float, stop_loss: float,
@@ -75,13 +76,13 @@ class RiskManager:
     def open_trade(self, symbol: str):
         self._open_symbols.add(symbol.upper())
         self._trades_today += 1
-        self._daily_risk_used += self.risk_per_trade
 
-    def close_trade(self, symbol: str):
+    def close_trade(self, symbol: str, pnl: float = 0.0):
         self._open_symbols.discard(symbol.upper())
+        self._daily_realized_pnl += pnl  # Track actual P&L
 
     def reset_daily(self):
-        self._daily_risk_used = 0.0
+        self._daily_realized_pnl = 0.0
         self._trades_today = 0
 
     @staticmethod

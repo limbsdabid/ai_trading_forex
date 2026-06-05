@@ -102,12 +102,24 @@ class TradingBot:
             log.error(f"Failed to sync MT5 account: {e}")
 
     def _reconcile_positions(self):
+        """Reconcile open trades with actual broker positions.
+        If a trade is in _open_trades but not in broker, assume it was auto-closed (SL/TP hit)."""
         current = {(p.symbol, p.side) for p in self.broker.get_positions()}
         for key in list(self._open_trades.keys()):
             trade = self._open_trades[key]
             side = OrderSide.BUY if trade['side'] == 'buy' else OrderSide.SELL
             if (trade['symbol'], side) not in current:
-                self._on_trade_closed(key, trade.get('entry', 0), datetime.now().isoformat(), 0.0, 'closed')
+                # Position was closed externally. Get current price as best estimate of exit price
+                try:
+                    data = self.data_provider.fetch_rates(trade['symbol'], "M5", 1)
+                    exit_price = data.data.iloc[-1]["close"] if data else trade.get('entry', 0)
+                except Exception:
+                    exit_price = trade.get('entry', 0)
+
+                # Calculate estimated P&L
+                pnl = (exit_price - trade['entry']) * trade['volume'] * 10000 if side == OrderSide.BUY else (trade['entry'] - exit_price) * trade['volume'] * 10000
+                log.warning(f"Position {trade['symbol']} {side.value} auto-closed (estimated exit={exit_price}, pnl={pnl:.2f})")
+                self._on_trade_closed(key, exit_price, datetime.now().isoformat(), pnl, 'auto_closed')
 
     def _scan_cycle(self):
         log.info(f"=== Scan cycle: {datetime.now().isoformat()} ===")
@@ -152,8 +164,13 @@ class TradingBot:
 
         if signal.type in (SignalType.CLOSE_BUY, SignalType.CLOSE_SELL):
             side = OrderSide.BUY if signal.type == SignalType.CLOSE_BUY else OrderSide.SELL
-            self.broker.close_position(signal.symbol, side)
-            log.info(f"Closed {signal.symbol} {side.value} position")
+            position_key = f"{signal.symbol}_{side.value}"
+            if self.broker.close_position(signal.symbol, side):
+                trade = self._open_trades.pop(position_key, {})
+                if trade:
+                    pnl = (price - trade['entry']) * trade['volume'] * 10000 if side == OrderSide.BUY else (trade['entry'] - price) * trade['volume'] * 10000
+                    self._on_trade_closed(position_key, price, datetime.now().isoformat(), pnl, 'manual_close')
+                log.info(f"Closed {signal.symbol} {side.value} position")
             return
 
         if any(pos.symbol == signal.symbol for pos in self.broker.get_positions()):
@@ -211,7 +228,7 @@ class TradingBot:
     def _on_trade_closed(self, key: str, exit_price: float, exit_time: str, pnl: float, result: str):
         trade = self._open_trades.pop(key, {})
         symbol = trade.get('symbol') or key.split('_')[0]
-        self.risk_manager.close_trade(symbol)   # release the symbol slot
+        self.risk_manager.close_trade(symbol, pnl)   # release symbol slot and track P&L
         file_exists = TRADE_LOG_PATH.exists()
         TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(TRADE_LOG_PATH, "a", newline="") as f:
@@ -232,9 +249,6 @@ class TradingBot:
                 round(pnl, 2),
                 result,
             ])
-
-        symbol = trade.get('symbol', key.split('_')[0] if '_' in key else key)
-        self.risk_manager.close_trade(symbol)  # release symbol slot
 
         # Sync actual balance from MT5 after every closed trade (LiveBroker only)
         if self.config.use_mt5 and not self.config.paper_trading:
