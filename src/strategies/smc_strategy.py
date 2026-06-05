@@ -132,28 +132,38 @@ class SMCStrategy(Strategy):
         return self.ml_thresholds.get(symbol.upper(), self.ml_threshold)
 
     def generate_signal(self, data: pd.DataFrame, symbol: str) -> Signal:
+        import logging
+        _log = logging.getLogger('trading_bot')
+
         if self.data_provider is None:
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
-
-        current_time = datetime.now()
 
         h4  = self._fetch_data(symbol, 'H4',  300)
         m15 = self._fetch_data(symbol, 'M15', 1000)
         m5  = self._fetch_data(symbol, 'M5',  500)
-        h1  = self._fetch_data(symbol, 'H1',  100)  # for ML filter
+        h1  = self._fetch_data(symbol, 'H1',  100)
 
+        # Gate 1: Data
         if h4 is None or m15 is None or m5 is None:
+            _log.info(f"{symbol}: [G1-FAIL] No data h4={h4 is not None} m15={m15 is not None} m5={m5 is not None}")
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
 
+        # Gate 2: H4 Bias
         bias = get_h4_bias(h4)
         if bias == 'neutral':
+            _log.info(f"{symbol}: [G2-FAIL] H4 bias=neutral")
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
+        _log.info(f"{symbol}: [G2-PASS] H4 bias={bias}")
 
+        # Gate 3: M15 Confluent Zones
         obs, fvgs = find_zones(m15)
         zones = get_confluence(obs, fvgs, bias)
         if len(zones) == 0:
+            _log.info(f"{symbol}: [G3-FAIL] No zones — OBs={len(obs)} FVGs={len(fvgs)}")
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
+        _log.info(f"{symbol}: [G3-PASS] {len(zones)} zones (OBs={len(obs)} FVGs={len(fvgs)})")
 
+        # Gate 4: Price in Zone
         price = m5['close'].iloc[-1]
         recent_zones = zones[zones['t'] >= m15.index[-20]]
         in_zone = False
@@ -162,10 +172,17 @@ class SMCStrategy(Strategy):
                 in_zone = True
                 break
         if not in_zone:
+            nearest = min(abs(price - z['mid']) for _, z in zones.iterrows()) if len(zones) > 0 else 0
+            _log.info(f"{symbol}: [G4-FAIL] Price {price:.5f} not in zone — nearest={nearest:.5f} ({len(recent_zones)} recent zones)")
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
+        _log.info(f"{symbol}: [G4-PASS] Price {price:.5f} inside zone")
 
+        # Gate 5: M5 CHoCH
         if not detect_choch_m5(m5, bias):
+            _log.info(f"{symbol}: [G5-FAIL] No CHoCH on M5 for bias={bias}")
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
+        _log.info(f"{symbol}: [G5-PASS] CHoCH confirmed on M5")
+
 
         # ── ML Filter gate ──────────────────────────────────────────────
         ml_score = 0.5
