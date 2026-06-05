@@ -175,6 +175,8 @@ class SMCStrategy(Strategy):
         self.data_provider = data_provider
         self.ml_threshold  = ml_threshold          # fallback default
         self.ml_thresholds = ml_thresholds or {}   # per-symbol overrides
+        self.use_mtl       = False
+        self.ab_test       = False
         # Per-symbol MLFilter cache — loaded lazily on first use per symbol
         self._ml_filters: dict[str, MLFilter] = {}
 
@@ -241,15 +243,30 @@ class SMCStrategy(Strategy):
             threshold = self._get_threshold(symbol)
             # Lazy-load per-symbol filter (cached after first use)
             if symbol not in self._ml_filters:
+                use_mtl = self.use_mtl
+                ab_test = self.ab_test
                 self._ml_filters[symbol] = MLFilter(
-                    threshold=threshold, symbol=symbol
+                    threshold=threshold,
+                    use_mtl=use_mtl, ab_test=ab_test,
                 )
+                logger = logging.getLogger("trading_bot")
                 if self._ml_filters[symbol].available:
-                    import logging
-                    logging.getLogger("trading_bot").info(
-                        f"MLFilter [{symbol}] active — threshold={threshold}"
-                    )
-            allow, ml_score = self._ml_filters[symbol].should_trade(h1)
+                    if use_mtl:
+                        logger.info(f"MLFilter [MTL] active for {symbol} — threshold={threshold}")
+                    else:
+                        logger.info(f"MLFilter [{symbol}] active — threshold={threshold}")
+                    if ab_test and not use_mtl:
+                        logger.info(f"MLFilter A/B test enabled for {symbol}")
+
+            if self.ab_test and not self.use_mtl:
+                old_score, mtl_score = self._ml_filters[symbol].score_both(
+                    h1, symbol, signal_type="HOLD"
+                )
+                ml_score = old_score
+                allow    = ml_score >= threshold
+            else:
+                allow, ml_score = self._ml_filters[symbol].should_trade(h1)
+
             if not allow:
                 import logging
                 logging.getLogger("trading_bot").info(

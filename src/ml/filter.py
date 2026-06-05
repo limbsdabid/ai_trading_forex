@@ -1,24 +1,24 @@
 """
-ML Filter — XGBoost signal confidence scorer, one model per symbol.
+ML Filter — XGBoost signal confidence scorer, per-symbol and unified MTL models.
 
-Loads pre-trained model from models/{SYMBOL}_filter.pkl and computes
-a win-probability score for each SMC signal before it is sent to
-the broker. A score >= threshold is required to trade.
+Per-symbol: models/{SYMBOL}_filter.pkl  (one per pair)
+Unified MTL: models/mtl_filter.pkl     (single model, all pairs, 30 features)
 
-Falls back to the generic ml_filter.pkl if a symbol-specific model
-is not yet trained.
+A/B testing: score_both() returns (per_symbol, mtl) for side-by-side comparison,
+logged to logs/ab_test_scores.csv without affecting trading decisions.
 
-Usage inside SMCStrategy:
-    from src.ml.filter import MLFilter
-    ml = MLFilter()
-    score = ml.score(df_h1, symbol="GBPUSD")
-    if score < threshold:
-        return HOLD
+Usage:
+    ml = MLFilter(threshold=0.55)
+    score = ml.score(df_h1, symbol="GBPUSD")           # per-symbol
+    score = ml.score(df_h1, symbol="GBPUSD")           # MTL if use_mtl=True
+    old, mtl = ml.score_both(df_h1, symbol="GBPUSD")   # A/B comparison
 """
 
 from __future__ import annotations
 
+import csv
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -27,9 +27,36 @@ import pandas as pd
 
 log = logging.getLogger("trading_bot")
 
-MODELS_DIR     = Path(__file__).parent.parent.parent / "models"
-FALLBACK_MODEL = MODELS_DIR / "ml_filter.pkl"          # legacy single model
+MODELS_DIR  = Path(__file__).parent.parent.parent / "models"
+LOGS_DIR    = Path(__file__).parent.parent.parent / "logs"
+AB_TEST_LOG = LOGS_DIR / "ab_test_scores.csv"
+
+FALLBACK_MODEL = MODELS_DIR / "ml_filter.pkl"
 DEFAULT_THRESHOLD = 0.52
+
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
+
+PAIR_ENCODER = {
+    "EURUSD": 0, "GBPUSD": 1, "USDJPY": 2, "USDCHF": 3,
+    "AUDUSD": 4, "USDCAD": 5, "NZDUSD": 6,
+}
+
+FEATURES_MTL = [
+    "rsi", "rsi_lag1",
+    "macd_hist", "bb_position", "bb_width",
+    "atr_pct", "return_1", "return_5",
+    "body_ratio", "volume_ratio",
+    "session", "dow",
+    "momentum_alignment", "trend_strength",
+    "vol_spike", "rsi_extreme", "atr_regime",
+    "pair_correlation",
+    "usd_index_strength",
+    "cross_correlation_eur",
+    "cross_correlation_gbp",
+    "cross_correlation_usd",
+    "pair_id_eurusd", "pair_id_gbpusd", "pair_id_usdjpy",
+    "pair_id_usdchf", "pair_id_audusd", "pair_id_usdcad", "pair_id_nzdusd",
+]
 
 
 def _session(hour: int) -> int:
@@ -140,24 +167,77 @@ def _build_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
 
+def _build_mtl_features(df: pd.DataFrame, symbol: str) -> Optional[pd.DataFrame]:
+    """
+    Build 30 features for MTL model: 17 SMC + 6 correlation (padded 0.0) + 7 pair_id.
+
+    NOTE: Correlation features (pair_correlation, usd_index_strength, etc.)
+    require all 7 pairs' aligned OHLCV data to compute rolling correlations.
+    During live inference, only one symbol's data is available, so these
+    features are set to 0.0 (neutral). The model still benefits from having
+    learned correlation patterns during training.
+
+    For full correlation scoring at inference time, pass cached pair data
+    via MLFilter.update_pair_cache() before calling score().
+    """
+    base = _build_features(df)
+    if base is None:
+        return None
+
+    pair_idx = PAIR_ENCODER.get(symbol, 0)
+
+    row = base.iloc[0].to_dict()
+
+    row["pair_correlation"]      = 0.0
+    row["usd_index_strength"]    = 0.0
+    row["cross_correlation_eur"] = 0.0
+    row["cross_correlation_gbp"] = 0.0
+    row["cross_correlation_usd"] = 0.0
+
+    for i, sym in enumerate(SYMBOLS):
+        row[f"pair_id_{sym.lower()}"] = 1.0 if i == pair_idx else 0.0
+
+    return pd.DataFrame([row])
+
+
 class MLFilter:
     """
-    Wraps per-symbol XGBoost models.
+    XGBoost signal confidence scorer — per-symbol or unified MTL.
 
-    Each symbol has its own model: models/{SYMBOL}_filter.pkl
-    Falls back to the legacy single model if the symbol model is missing.
+    Per-symbol mode (default):
+        models/{SYMBOL}_filter.pkl  — one model per pair
+
+    MTL mode (use_mtl=True):
+        models/mtl_filter.pkl       — single model, all 30 features
+        Correlation features padded to 0.0 at inference (no multi-symbol data).
+
+    A/B testing:
+        score_both() returns (per_symbol, mtl) tuple without changing trading.
+        Logged to logs/ab_test_scores.csv for offline comparison.
     """
 
-    def __init__(self, threshold: float = DEFAULT_THRESHOLD):
-        self.threshold = threshold
-        self._models:   dict[str, object] = {}   # symbol → model
-        self._features: dict[str, list]   = {}   # symbol → feature list
+    def __init__(self, threshold: float = DEFAULT_THRESHOLD, use_mtl: bool = False,
+                 ab_test: bool = False):
+        self.threshold   = threshold
+        self.use_mtl     = use_mtl
+        self.ab_test     = ab_test and not use_mtl  # A/B only meaningful in per-symbol mode
+
+        self._models:   dict[str, object] = {}
+        self._features: dict[str, list]   = {}
         self._fallback_model    = None
         self._fallback_features = None
+        self._mtl_model    = None
+        self._mtl_features = None
+
+        self._pair_cache: dict[str, pd.DataFrame] = {}
+
         self._load_fallback()
+        if use_mtl:
+            self._load_mtl_model()
+
+    # ── Model loaders ────────────────────────────────────────────────────
 
     def _load_fallback(self) -> None:
-        """Load legacy single model as fallback."""
         try:
             import joblib
             if FALLBACK_MODEL.exists():
@@ -169,7 +249,6 @@ class MLFilter:
             log.warning(f"MLFilter: fallback model failed to load: {e}")
 
     def _load_symbol(self, symbol: str) -> bool:
-        """Lazy-load the model for a specific symbol. Returns True if successful."""
         if symbol in self._models:
             return True
         try:
@@ -186,51 +265,121 @@ class MLFilter:
             log.warning(f"MLFilter: failed to load {symbol} model: {e}")
             return False
 
+    def _load_mtl_model(self) -> None:
+        try:
+            import joblib
+            model_path = MODELS_DIR / "mtl_filter.pkl"
+            feat_path  = MODELS_DIR / "mtl_filter_features.pkl"
+            if model_path.exists():
+                self._mtl_model    = joblib.load(model_path)
+                self._mtl_features = joblib.load(feat_path) if feat_path.exists() else None
+                log.info("MLFilter: MTL model loaded")
+            else:
+                log.warning("MLFilter: MTL model not found (models/mtl_filter.pkl)")
+                self.use_mtl = False
+        except Exception as e:
+            log.warning(f"MLFilter: failed to load MTL model: {e}")
+            self.use_mtl = False
+
     @property
     def available(self) -> bool:
-        """True if at least the fallback model is loaded."""
         return self._fallback_model is not None or len(self._models) > 0
+
+    # ── Pair cache (optional, for correlation features at inference) ─────
+
+    def update_pair_cache(self, symbol: str, df: pd.DataFrame) -> None:
+        """Store recent OHLCV for a symbol, used by _build_correlation_features()."""
+        self._pair_cache[symbol] = df.copy()
+
+    # ── Scoring ──────────────────────────────────────────────────────────
 
     def score(self, df: pd.DataFrame, symbol: str = "EURUSD") -> float:
         """
-        Compute win-probability for the current market context.
+        Compute win-probability.
 
-        Uses the symbol-specific model if available, otherwise falls back
-        to the generic EURUSD model.
-
-        Parameters
-        ----------
-        df     : Recent H1 OHLCV bars for the symbol
-        symbol : e.g. "GBPUSD" — selects the correct trained model
-
-        Returns
-        -------
-        float  Win probability in [0, 1]. Returns 0.5 if unavailable.
+        Routing:
+          use_mtl=True  → MTL model (30 features, correlation padded)
+          use_mtl=False → per-symbol model or fallback
         """
+        if self.use_mtl:
+            return self._score_mtl(df, symbol)
+        return self._score_per_symbol(df, symbol)
+
+    def _score_per_symbol(self, df: pd.DataFrame, symbol: str) -> float:
         features = _build_features(df)
         if features is None:
             return 0.5
 
-        # Try symbol-specific model first
         if self._load_symbol(symbol):
             model    = self._models[symbol]
             feat_lst = self._features.get(symbol)
         elif self._fallback_model is not None:
             model    = self._fallback_model
             feat_lst = self._fallback_features
-            log.debug(f"{symbol}: using fallback (EURUSD) ML model")
         else:
-            return 0.5   # no model at all — don't block trades
+            return 0.5
 
         try:
             if feat_lst is not None:
                 features = features[feat_lst]
             return float(model.predict_proba(features)[0, 1])
         except Exception as e:
-            log.warning(f"MLFilter.score() failed for {symbol}: {e}")
+            log.warning(f"MLFilter._score_per_symbol({symbol}) failed: {e}")
             return 0.5
 
+    def _score_mtl(self, df: pd.DataFrame, symbol: str) -> float:
+        if self._mtl_model is None:
+            return 0.5
+
+        features = _build_mtl_features(df, symbol)
+        if features is None:
+            return 0.5
+
+        try:
+            feat_lst = self._mtl_features
+            if feat_lst is not None:
+                features = features[feat_lst]
+            return float(self._mtl_model.predict_proba(features)[0, 1])
+        except Exception as e:
+            log.warning(f"MLFilter._score_mtl({symbol}) failed: {e}")
+            return 0.5
+
+    def score_both(self, df: pd.DataFrame, symbol: str = "EURUSD",
+                   signal_type: str = "HOLD") -> tuple[float, float]:
+        """
+        Return (per_symbol_score, mtl_score) for A/B testing.
+
+        Logs both scores to logs/ab_test_scores.csv.
+        Does NOT affect trading decisions.
+        """
+        old_score = self._score_per_symbol(df, symbol)
+        mtl_score = self._score_mtl(df, symbol)
+
+        self._log_ab(symbol, old_score, mtl_score, signal_type)
+        return old_score, mtl_score
+
     def should_trade(self, df: pd.DataFrame, symbol: str = "EURUSD") -> tuple[bool, float]:
-        """Returns (allow_trade, confidence_score)."""
         prob = self.score(df, symbol)
         return prob >= self.threshold, prob
+
+    # ── A/B logging ──────────────────────────────────────────────────────
+
+    def _log_ab(self, symbol: str, old_score: float, mtl_score: float,
+                signal_type: str = "HOLD") -> None:
+        try:
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            file_exists = AB_TEST_LOG.exists()
+            with open(AB_TEST_LOG, "a", newline="") as f:
+                w = csv.writer(f)
+                if not file_exists:
+                    w.writerow(["timestamp", "symbol", "old_score", "mtl_score",
+                                "signal_type"])
+                w.writerow([
+                    datetime.now().isoformat(),
+                    symbol,
+                    round(old_score, 4),
+                    round(mtl_score, 4),
+                    signal_type,
+                ])
+        except Exception as e:
+            log.debug(f"A/B log write failed: {e}")

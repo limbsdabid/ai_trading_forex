@@ -58,6 +58,9 @@ class Config:
         "NZDUSD": 0.52,
     })
 
+    use_mtl: bool = False
+    ab_test: bool = False
+
     def get_threshold(self, symbol: str) -> float:
         """Return the ML threshold for a symbol, falling back to ml_threshold."""
         return self.ml_thresholds.get(symbol.upper(), self.ml_threshold)
@@ -78,4 +81,6 @@ class Config:
             telegram_bot_token=_load_secret("ai_trading_forex", "telegram_bot_token", "TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             ml_threshold=float(os.getenv("ML_THRESHOLD", "0.55")),
+            use_mtl=os.getenv("USE_MTL", "false").lower() == "true",
+            ab_test=os.getenv("AB_TEST", "false").lower() == "true",
         )

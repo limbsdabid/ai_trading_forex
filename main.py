@@ -51,6 +51,11 @@ class TradingBot:
                 ml_thresholds=config.ml_thresholds,
             ),
         ]
+        if config.use_mtl or config.ab_test:
+            for strat in self.strategies:
+                if isinstance(strat, SMCStrategy):
+                    strat.use_mtl = config.use_mtl
+                    strat.ab_test = config.ab_test
         self.broker.on_close = self._on_trade_closed
         self.notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
         self.symbols = config.symbols
