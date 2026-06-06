@@ -64,6 +64,11 @@ PAIR_ENCODER = {
     "NZDUSD": 6,
 }
 
+MTL_LABEL = "trade_outcome"
+MTL_R_MULTIPLE = "forward_r"
+MTL_FORWARD_BARS = 12
+MTL_REWARD_R = 2.0
+
 
 def _session(h: int) -> int:
     if 7  <= h < 12: return 0   # London
@@ -151,6 +156,88 @@ def _find_data(symbol: str) -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def add_trade_outcome_labels(
+    df: pd.DataFrame,
+    horizon: int = MTL_FORWARD_BARS,
+    reward_r: float = MTL_REWARD_R,
+) -> pd.DataFrame:
+    """Label rows by simulated SL/TP outcome and forward R-multiple.
+
+    Direction is inferred from the local trend context. Long if close is above
+    SMA20, otherwise short. Risk is ATR-based when available, falling back to
+    the candle range. A win is first touch of +reward_r before -1R within the
+    lookahead window. If neither level is touched, use terminal R at horizon.
+    """
+    df = df.copy()
+    if "sma_20" in df.columns:
+        direction = np.where(df["close"] >= df["sma_20"], 1, -1)
+    elif "pct_from_sma20" in df.columns:
+        direction = np.where(df["pct_from_sma20"] >= 0, 1, -1)
+    else:
+        direction = np.where(df["close"].diff().fillna(0) >= 0, 1, -1)
+
+    risk = df.get("atr")
+    if risk is None:
+        risk = df["high"] - df["low"]
+    risk = risk.fillna(df["high"] - df["low"]).replace(0, np.nan)
+    risk = risk.fillna((df["high"] - df["low"]).rolling(14).mean())
+    risk = risk.bfill().ffill()
+
+    outcomes = np.full(len(df), np.nan)
+    r_values = np.full(len(df), np.nan)
+    closes = df["close"].to_numpy()
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    risks = risk.to_numpy()
+
+    for i in range(len(df) - horizon):
+        if not np.isfinite(risks[i]) or risks[i] <= 0:
+            continue
+
+        side = direction[i]
+        entry = closes[i]
+        stop = entry - side * risks[i]
+        target = entry + side * reward_r * risks[i]
+        final_r = side * (closes[i + horizon] - entry) / risks[i]
+
+        result_r = final_r
+        for j in range(i + 1, i + horizon + 1):
+            hit_tp = highs[j] >= target if side == 1 else lows[j] <= target
+            hit_sl = lows[j] <= stop if side == 1 else highs[j] >= stop
+            if hit_tp and hit_sl:
+                result_r = -1.0
+                break
+            if hit_sl:
+                result_r = -1.0
+                break
+            if hit_tp:
+                result_r = reward_r
+                break
+
+        r_values[i] = result_r
+        outcomes[i] = 1 if result_r > 0 else 0
+
+    df[MTL_R_MULTIPLE] = r_values
+    df[MTL_LABEL] = outcomes
+    return df
+
+
+def expectancy_from_r(r_values: pd.Series) -> tuple[float, float, float, float]:
+    """Return expectancy, win rate, average win R, and average loss R."""
+    r_values = pd.Series(r_values).dropna()
+    if r_values.empty:
+        return 0.0, 0.0, 0.0, 0.0
+
+    wins = r_values[r_values > 0]
+    losses = r_values[r_values <= 0]
+    win_rate = len(wins) / len(r_values)
+    loss_rate = 1.0 - win_rate
+    avg_win_r = wins.mean() if len(wins) else 0.0
+    avg_loss_r = abs(losses.mean()) if len(losses) else 0.0
+    expectancy = (win_rate * avg_win_r) - (loss_rate * avg_loss_r)
+    return float(expectancy), float(win_rate), float(avg_win_r), float(avg_loss_r)
 
 
 def load_all_symbols(symbols: list[str]) -> dict[str, pd.DataFrame]:
@@ -297,6 +384,7 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         else:
             # Raw OHLCV data — compute all features from scratch
             df = add_features_mtl(df, sym, all_data)
+        df = add_trade_outcome_labels(df)
         df = df.reset_index()
 
         df["symbol"] = sym
@@ -307,12 +395,12 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         return None
 
     combined_df = pd.concat(dfs, ignore_index=True)
-    combined_df = combined_df.dropna(subset=FEATURES_MTL + ["Target"])
+    combined_df = combined_df.dropna(subset=FEATURES_MTL + [MTL_LABEL, MTL_R_MULTIPLE])
 
     log.info(f"Combined dataset: {len(combined_df)} rows across {len(set(combined_df['symbol']))} symbols")
 
     X = combined_df[FEATURES_MTL]
-    y = combined_df["Target"].astype(int)
+    y = combined_df[MTL_LABEL].astype(int)
 
     train_test_splits = []
     for sym in set(combined_df["symbol"]):
@@ -374,6 +462,9 @@ def train_unified_model(symbols: list[str]) -> dict | None:
     proba_te = model.predict_proba(X_te)[:, 1]
     auc_te = roc_auc_score(y_te, proba_te)
     acc_te = model.score(X_te, y_te)
+    expectancy_te, wr_te, avg_win_r_te, avg_loss_r_te = expectancy_from_r(
+        combined_df.loc[test_idx, MTL_R_MULTIPLE]
+    )
 
     best_iter = model.best_iteration + 1 if hasattr(model, 'best_iteration') else 600
     log.info(f"MTL Model: AUC={auc_te:.3f} | Acc={acc_te:.3f} | best_iter={best_iter}")
@@ -384,6 +475,8 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         f"Total samples: {len(combined_df)} (train={len(X_tr)}, val={len(X_val)}, test={len(X_te)})",
         f"Test AUC: {auc_te:.3f}",
         f"Test Accuracy: {acc_te:.3f}",
+        f"Test Expectancy: {expectancy_te:.3f}R",
+        f"Test WR: {wr_te * 100:.1f}% | Avg Win: {avg_win_r_te:.2f}R | Avg Loss: {avg_loss_r_te:.2f}R",
         "",
         "Per-symbol test performance:",
     ]
@@ -395,8 +488,14 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         y_sym    = y_te.values[sym_mask]
         proba_sym = proba_te[sym_mask]
         auc_sym = roc_auc_score(y_sym, proba_sym) if len(np.unique(y_sym)) > 1 else 0.5
-        wr_sym = y_sym.mean() * 100
-        lines.append(f"  {sym}: AUC={auc_sym:.3f} | WR={wr_sym:.1f}% ({len(y_sym)} samples)")
+        exp_sym, wr_sym, avg_win_sym, avg_loss_sym = expectancy_from_r(
+            combined_df.loc[test_idx, MTL_R_MULTIPLE].values[sym_mask]
+        )
+        lines.append(
+            f"  {sym}: AUC={auc_sym:.3f} | WR={wr_sym * 100:.1f}% "
+            f"| Exp={exp_sym:.3f}R | AvgW={avg_win_sym:.2f}R | AvgL={avg_loss_sym:.2f}R "
+            f"({len(y_sym)} samples)"
+        )
 
     lines += ["", "Feature Importances (Top 15):"]
     imp = pd.DataFrame({"feature": FEATURES_MTL, "importance": model.feature_importances_})
@@ -423,6 +522,7 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         "samples": len(combined_df),
         "auc": auc_te,
         "accuracy": acc_te,
+        "expectancy": expectancy_te,
         "test_samples": len(X_te),
     }
 
@@ -635,14 +735,15 @@ def tune_mtl(symbols: list[str]) -> None:
         has_rsi = "rsi" in df.columns
         df = df.set_index("time")
         df = _add_mtl_extra(df, sym, all_data) if has_rsi else add_features_mtl(df, sym, all_data)
+        df = add_trade_outcome_labels(df)
         df = df.reset_index()
         df["symbol"] = sym
         dfs.append(df)
 
-    combined = pd.concat(dfs, ignore_index=True).dropna(subset=FEATURES_MTL + ["Target"])
+    combined = pd.concat(dfs, ignore_index=True).dropna(subset=FEATURES_MTL + [MTL_LABEL, MTL_R_MULTIPLE])
     log.info(f"Combined: {len(combined)} rows")
 
-    X, y = combined[FEATURES_MTL], combined["Target"].astype(int)
+    X, y = combined[FEATURES_MTL], combined[MTL_LABEL].astype(int)
 
     # Stratified split
     train_parts, val_parts, test_parts = [], [], []
@@ -711,8 +812,16 @@ def tune_mtl(symbols: list[str]) -> None:
         val_auc   = roc_auc_score(y_val, val_proba)
         te_proba  = model.predict_proba(X_te)[:, 1]
         te_auc    = roc_auc_score(y_te, te_proba)
+        te_exp, te_wr, te_avg_win, te_avg_loss = expectancy_from_r(
+            combined.loc[test_idx, MTL_R_MULTIPLE]
+        )
 
-        log.info(f"  val_auc={val_auc:.4f}  test_auc={te_auc:.4f}  best_iter={model.best_iteration + 1}")
+        log.info(
+            f"  val_auc={val_auc:.4f}  test_auc={te_auc:.4f}  "
+            f"test_exp={te_exp:.3f}R  wr={te_wr * 100:.1f}%  "
+            f"avgW={te_avg_win:.2f}R  avgL={te_avg_loss:.2f}R  "
+            f"best_iter={model.best_iteration + 1}"
+        )
 
         if val_auc > best_score:
             best_score = val_auc
@@ -736,7 +845,13 @@ def tune_mtl(symbols: list[str]) -> None:
     final.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
     te_proba = final.predict_proba(X_te)[:, 1]
     te_auc   = roc_auc_score(y_te, te_proba)
-    log.info(f"Final test AUC: {te_auc:.4f}")
+    te_exp, te_wr, te_avg_win, te_avg_loss = expectancy_from_r(
+        combined.loc[test_idx, MTL_R_MULTIPLE]
+    )
+    log.info(
+        f"Final test AUC: {te_auc:.4f} | expectancy={te_exp:.3f}R | "
+        f"WR={te_wr * 100:.1f}% | AvgW={te_avg_win:.2f}R | AvgL={te_avg_loss:.2f}R"
+    )
 
     joblib.dump(final, MODELS_DIR / "mtl_filter.pkl")
     joblib.dump(FEATURES_MTL, MODELS_DIR / "mtl_filter_features.pkl")
