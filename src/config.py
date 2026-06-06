@@ -59,7 +59,7 @@ class Config:
     })
 
     use_mtl: bool = False
-    ab_test: bool = False
+    ab_test: bool = True
 
     def get_threshold(self, symbol: str) -> float:
         """Return the ML threshold for a symbol, falling back to ml_threshold."""
@@ -82,5 +82,5 @@ class Config:
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             ml_threshold=float(os.getenv("ML_THRESHOLD", "0.55")),
             use_mtl=os.getenv("USE_MTL", "false").lower() == "true",
-            ab_test=os.getenv("AB_TEST", "false").lower() == "true",
+            ab_test=os.getenv("AB_TEST", "true").lower() == "true",
         )
