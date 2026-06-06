@@ -1,5 +1,5 @@
-pandas>=2.0.0
-numpy>=1.24.0
+pandas>=2.0.0,<3.0
+numpy>=1.24.0,<2.0
 python-dotenv>=1.0.0
 python-telegram-bot>=20.0
 MetaTrader5>=5.0.45
@@ -9,3 +9,7 @@ rich>=13.0.0
 schedule>=1.2.0
 keyring>=24.0.0
 pytest>=8.0.0
+joblib>=1.4.0
+scikit-learn>=1.4.0,<1.6
+scipy>=1.11.0,<1.14
+xgboost>=2.0.0,<3.0
