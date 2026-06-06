@@ -1,3 +1,24 @@
+"""
+main.py — SMC Forex Trading Bot entry point
+============================================
+Changes vs previous version
+────────────────────────────
+[FIX-1]  Manual close (CLOSE_BUY / CLOSE_SELL) now calls _on_trade_closed()
+         so the trade is properly logged to trades.csv.
+         (VERIFIED_ISSUES.md Issue #1 — HIGH severity)
+
+[FIX-2]  _scan_cycle now fetches H1 bars (200 bars) alongside M5 and passes
+         them to generate_signal() so SMCStrategy can feed the ML filter.
+         The signal call signature is expanded from
+             strategy.generate_signal(data.data, symbol)
+         to
+             strategy.generate_signal(data.data, symbol, h1_data=h1_data)
+         smc_strategy.py picks up the kwarg; all other strategies ignore it.
+
+[FIX-3]  Scan interval now clamped to 1–1440 minutes.
+         (VERIFIED_ISSUES.md Issue #4 — MEDIUM severity)
+"""
+
 import time
 import csv
 import os
@@ -17,7 +38,6 @@ from src.risk import RiskManager, TradeSizing
 from src.notifications import TelegramNotifier
 from src.utils import setup_logger
 
-
 console = Console()
 log = setup_logger()
 
@@ -25,24 +45,30 @@ TRADE_LOG_PATH = Path(__file__).parent / "logs" / "trades.csv"
 
 
 class TradingBot:
+
     def __init__(self, config: Config):
         self.config = config
+
         self.data_provider = DataProvider(
             mt5_login=config.mt5_login,
             mt5_password=config.mt5_password,
             mt5_server=config.mt5_server,
         )
+
         if config.paper_trading:
             self.broker: Broker = PaperBroker(config.account_balance)
         else:
             self.broker: Broker = LiveBroker()
+
         # Note: balance sync happens AFTER MT5 connects in start()
+
         self.risk_manager = RiskManager(
             account_balance=config.account_balance,
             risk_per_trade=config.risk_per_trade,
             max_daily_risk=config.max_daily_risk,
             max_positions=config.max_positions,
         )
+
         self.strategies: list[Strategy] = [
             SMCStrategy(
                 risk_manager=self.risk_manager,
@@ -51,11 +77,13 @@ class TradingBot:
                 ml_thresholds=config.ml_thresholds,
             ),
         ]
+
         if config.use_mtl or config.ab_test:
             for strat in self.strategies:
                 if isinstance(strat, SMCStrategy):
                     strat.use_mtl = config.use_mtl
                     strat.ab_test = config.ab_test
+
         self.broker.on_close = self._on_trade_closed
         self.notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
         self.symbols = config.symbols
@@ -63,6 +91,10 @@ class TradingBot:
         self._open_trades: dict[str, dict] = {}
         self._daily_trades: list[dict] = []
         self._last_summary_date = datetime.now().date()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Lifecycle
+    # ─────────────────────────────────────────────────────────────────────────
 
     def start(self):
         log.info("Bot starting...")
@@ -90,6 +122,10 @@ class TradingBot:
     def stop(self):
         self.running = False
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # MT5 helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
     def _sync_mt5_account(self):
         try:
             import MetaTrader5 as mt5
@@ -106,34 +142,55 @@ class TradingBot:
         except Exception as e:
             log.error(f"Failed to sync MT5 account: {e}")
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Reconciliation
+    # ─────────────────────────────────────────────────────────────────────────
+
     def _reconcile_positions(self):
         """Reconcile open trades with actual broker positions.
-        If a trade is in _open_trades but not in broker, assume it was auto-closed (SL/TP hit)."""
+
+        If a trade is in _open_trades but not in broker, assume it was
+        auto-closed (SL/TP hit).  Uses last M5 close as best-effort exit price.
+        """
         current = {(p.symbol, p.side) for p in self.broker.get_positions()}
+
         for key in list(self._open_trades.keys()):
             trade = self._open_trades[key]
             side = OrderSide.BUY if trade['side'] == 'buy' else OrderSide.SELL
+
             if (trade['symbol'], side) not in current:
-                # Position was closed externally. Get current price as best estimate of exit price
+                # Position was closed externally — best-effort exit price.
                 try:
                     data = self.data_provider.fetch_rates(trade['symbol'], "M5", 1)
                     exit_price = data.data.iloc[-1]["close"] if data else trade.get('entry', 0)
                 except Exception:
                     exit_price = trade.get('entry', 0)
 
-                # Calculate estimated P&L
-                pnl = (exit_price - trade['entry']) * trade['volume'] * 10000 if side == OrderSide.BUY else (trade['entry'] - exit_price) * trade['volume'] * 10000
-                log.warning(f"Position {trade['symbol']} {side.value} auto-closed (estimated exit={exit_price}, pnl={pnl:.2f})")
-                self._on_trade_closed(key, exit_price, datetime.now().isoformat(), pnl, 'auto_closed')
+                pnl = (
+                    (exit_price - trade['entry']) * trade['volume'] * 10000
+                    if side == OrderSide.BUY
+                    else (trade['entry'] - exit_price) * trade['volume'] * 10000
+                )
+
+                log.warning(
+                    f"Position {trade['symbol']} {side.value} auto-closed "
+                    f"(estimated exit={exit_price}, pnl={pnl:.2f})"
+                )
+                self._on_trade_closed(
+                    key, exit_price, datetime.now().isoformat(), pnl, 'auto_closed'
+                )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Main scan cycle  [FIX-2: adds H1 fetch + passes h1_data kwarg]
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _scan_cycle(self):
         log.info(f"=== Scan cycle: {datetime.now().isoformat()} ===")
         self._reconcile_positions()
 
         for symbol in self.symbols:
-            data = self.data_provider.fetch_rates(
-                symbol, "M5", 200
-            )
+            # Primary M5 bars (strategy entry logic + price display)
+            data = self.data_provider.fetch_rates(symbol, "M5", 200)
             if not data:
                 log.warning(f"No data for {symbol}, skipping")
                 continue
@@ -141,43 +198,83 @@ class TradingBot:
             latest_price = data.data.iloc[-1]["close"]
             log.info(f"{symbol}: {latest_price}")
 
+            # [FIX-2] H1 bars for the ML filter — 200 bars gives the same
+            # lookback used during model training.  We pass None on failure so
+            # smc_strategy.py can gracefully skip the ML gate rather than crash.
+            try:
+                h1_data_obj = self.data_provider.fetch_rates(symbol, "H1", 200)
+                h1_data = h1_data_obj.data if h1_data_obj else None
+            except Exception as e:
+                log.warning(f"{symbol}: H1 fetch failed ({e}), ML gate will be skipped")
+                h1_data = None
+
             for strategy in self.strategies:
-                signal = strategy.generate_signal(data.data, symbol)
+                signal = strategy.generate_signal(
+                    data.data,
+                    symbol,
+                    h1_data=h1_data,   # smc_strategy picks this up; others ignore it
+                )
                 self._execute_signal(signal, latest_price)
 
         self._check_daily_reset()
         self._display_positions()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Daily reset
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _check_daily_reset(self):
         now = datetime.now()
         if now.date() != self._last_summary_date:
             trades = len(self._daily_trades)
             if trades > 0:
-                wins = sum(1 for t in self._daily_trades if 'win' in t.get('result', ''))
+                wins   = sum(1 for t in self._daily_trades if 'win'  in t.get('result', ''))
                 losses = sum(1 for t in self._daily_trades if 'loss' in t.get('result', ''))
-                pnl = sum(t.get('pnl', 0) for t in self._daily_trades)
+                pnl    = sum(t.get('pnl', 0) for t in self._daily_trades)
                 balance = self.broker.get_account_balance()
                 self.notifier.send_daily_summary(trades, wins, losses, pnl, balance)
+
             self._daily_trades.clear()
             self._last_summary_date = now.date()
             self.risk_manager.reset_daily()
             log.info('Daily risk reset')
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Signal execution  [FIX-1: manual close now calls _on_trade_closed]
+    # ─────────────────────────────────────────────────────────────────────────
+
     def _execute_signal(self, signal: Signal, price: float):
         if signal.type == SignalType.HOLD:
             return
 
+        # ── Manual exit signal ────────────────────────────────────────────────
         if signal.type in (SignalType.CLOSE_BUY, SignalType.CLOSE_SELL):
             side = OrderSide.BUY if signal.type == SignalType.CLOSE_BUY else OrderSide.SELL
             position_key = f"{signal.symbol}_{side.value}"
+
             if self.broker.close_position(signal.symbol, side):
-                trade = self._open_trades.pop(position_key, {})
+                trade = self._open_trades.get(position_key, {})
+                pnl = 0.0
                 if trade:
-                    pnl = (price - trade['entry']) * trade['volume'] * 10000 if side == OrderSide.BUY else (trade['entry'] - price) * trade['volume'] * 10000
-                    self._on_trade_closed(position_key, price, datetime.now().isoformat(), pnl, 'manual_close')
-                log.info(f"Closed {signal.symbol} {side.value} position")
+                    pnl = (
+                        (price - trade['entry']) * trade['volume'] * 10000
+                        if side == OrderSide.BUY
+                        else (trade['entry'] - price) * trade['volume'] * 10000
+                    )
+
+                # [FIX-1] Was missing — trade was closed in broker but never
+                # logged, and the symbol slot was never released in RiskManager.
+                self._on_trade_closed(
+                    position_key,
+                    price,
+                    datetime.now().isoformat(),
+                    pnl,
+                    'manual_close',
+                )
+                log.info(f"Closed {signal.symbol} {side.value} position (manual, pnl={pnl:.2f})")
             return
 
+        # ── New trade ─────────────────────────────────────────────────────────
         if any(pos.symbol == signal.symbol for pos in self.broker.get_positions()):
             log.info(f"{signal.symbol}: position already exists, skipping")
             return
@@ -187,7 +284,7 @@ class TradingBot:
 
         sl_price = meta.get('sl', price * (0.995 if side == OrderSide.BUY else 1.005))
         tp_price = meta.get('tp', 0.0)
-        volume = meta.get('volume', 0.01)
+        volume   = meta.get('volume', 0.01)
 
         sizing = self.risk_manager.calculate_size(price, sl_price, signal.symbol)
         if not sizing:
@@ -208,46 +305,64 @@ class TradingBot:
 
         result = self.broker.place_order(order)
         if result and result.status == "executed":
-            self.risk_manager.open_trade(signal.symbol)   # pass symbol, not sizing
+            self.risk_manager.open_trade(signal.symbol)
             log.info(
                 f"{side.value.upper()} {signal.symbol} "
                 f"vol={volume} sl={sl_price} "
                 f"tp={tp_price} conf={signal.confidence}"
             )
+
             position_key = f"{signal.symbol}_{side.value}"
             self._open_trades[position_key] = {
                 'timestamp': datetime.now().isoformat(),
-                'symbol': signal.symbol,
-                'side': side.value,
-                'entry': price,
-                'sl': sl_price,
-                'tp': tp_price,
-                'volume': volume,
+                'symbol':    signal.symbol,
+                'side':      side.value,
+                'entry':     price,
+                'sl':        sl_price,
+                'tp':        tp_price,
+                'volume':    volume,
             }
+
             ml_score = meta.get('ml_score', None)
             self.notifier.send_trade_opened(
                 signal.symbol, side.value, price, sl_price, tp_price, volume,
                 ml_score=ml_score,
             )
 
-    def _on_trade_closed(self, key: str, exit_price: float, exit_time: str, pnl: float, result: str):
-        trade = self._open_trades.pop(key, {})
+    # ─────────────────────────────────────────────────────────────────────────
+    # Trade closed callback
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _on_trade_closed(
+        self,
+        key: str,
+        exit_price: float,
+        exit_time: str,
+        pnl: float,
+        result: str,
+    ):
+        trade  = self._open_trades.pop(key, {})
         symbol = trade.get('symbol') or key.split('_')[0]
-        self.risk_manager.close_trade(symbol, pnl)   # release symbol slot and track P&L
+
+        self.risk_manager.close_trade(symbol, pnl)   # release slot + track P&L
+
         file_exists = TRADE_LOG_PATH.exists()
         TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
         with open(TRADE_LOG_PATH, "a", newline="") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["timestamp", "symbol", "side", "entry", "sl", "tp",
-                               "volume", "exit_price", "exit_time", "pnl", "result"])
+                writer.writerow([
+                    "timestamp", "symbol", "side", "entry", "sl", "tp",
+                    "volume", "exit_price", "exit_time", "pnl", "result",
+                ])
             writer.writerow([
                 trade.get('timestamp', ''),
                 trade.get('symbol', key.split('_')[0] if '_' in key else key),
                 trade.get('side', ''),
                 round(trade['entry'], 5) if 'entry' in trade else '',
-                round(trade['sl'], 5) if 'sl' in trade else '',
-                round(trade['tp'], 5) if 'tp' in trade else '',
+                round(trade['sl'],    5) if 'sl'    in trade else '',
+                round(trade['tp'],    5) if 'tp'    in trade else '',
                 trade.get('volume', ''),
                 round(exit_price, 5),
                 exit_time,
@@ -259,10 +374,14 @@ class TradingBot:
         if self.config.use_mt5 and not self.config.paper_trading:
             self._sync_mt5_account()
 
-        side = trade.get('side', '')
+        side  = trade.get('side', '')
         entry = trade.get('entry', 0.0)
         self.notifier.send_trade_closed(symbol, side, entry, exit_price, pnl, result)
         self._daily_trades.append({'pnl': pnl, 'result': result})
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Display
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _display_positions(self):
         positions = self.broker.get_positions()
@@ -271,14 +390,14 @@ class TradingBot:
             return
 
         table = Table(title="Open Positions", title_style="bold cyan")
-        table.add_column("Symbol", style="cyan")
-        table.add_column("Side", style="yellow")
-        table.add_column("Vol", justify="right")
-        table.add_column("Entry", justify="right")
+        table.add_column("Symbol",  style="cyan")
+        table.add_column("Side",    style="yellow")
+        table.add_column("Vol",     justify="right")
+        table.add_column("Entry",   justify="right")
         table.add_column("Current", justify="right")
-        table.add_column("P&L", justify="right")
-        table.add_column("SL", justify="right")
-        table.add_column("TP", justify="right")
+        table.add_column("P&L",     justify="right")
+        table.add_column("SL",      justify="right")
+        table.add_column("TP",      justify="right")
 
         for pos in positions:
             pnl_color = "green" if pos.unrealized_pnl >= 0 else "red"
@@ -295,8 +414,13 @@ class TradingBot:
 
         console.print(table)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Scan sleep  [FIX-3: interval clamped to 1–1440 min]
+    # ─────────────────────────────────────────────────────────────────────────
+
     def _sleep_until_next_scan(self):
-        interval = self.config.scan_interval_minutes
+        # Clamp to sane bounds so a bad .env value can't freeze the bot.
+        interval = max(1, min(1440, self.config.scan_interval_minutes))
         log.info(f"Next scan in {interval} minutes")
         for _ in range(interval * 60):
             if not self.running:
@@ -304,15 +428,19 @@ class TradingBot:
             time.sleep(1)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main():
     config = Config.from_env()
-    bot = TradingBot(config)
+    bot    = TradingBot(config)
 
     console.print("[bold green]===== SMC Forex Trading Bot =====")
-    console.print(f"Symbols: {', '.join(config.symbols)}")
-    console.print(f"Strategy: SMC (H4 Bias + M15 Zones + M5 CHoCH)")
-    console.print(f"Risk per trade: {config.risk_per_trade*100}%")
-    console.print(f"Max lot: 1.0")
+    console.print(f"Symbols:          {', '.join(config.symbols)}")
+    console.print(f"Strategy:         SMC (H4 Bias + M15 Zones + M5 CHoCH + ML Filter)")
+    console.print(f"Risk per trade:   {config.risk_per_trade * 100}%")
+    console.print(f"Max lot:          1.0")
 
     if config.paper_trading:
         console.print("[yellow]Mode: Paper Trading[/yellow]")
