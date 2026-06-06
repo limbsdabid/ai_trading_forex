@@ -19,6 +19,10 @@ import sys
 import logging
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import numpy as np
 import pandas as pd
 import joblib
@@ -28,7 +32,6 @@ from src.ml import correlations
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-ROOT       = Path(__file__).parent.parent.parent
 DATA_DIR   = ROOT / "data"
 MODELS_DIR = ROOT / "models"
 
@@ -171,6 +174,14 @@ def add_trade_outcome_labels(
     lookahead window. If neither level is touched, use terminal R at horizon.
     """
     df = df.copy()
+    required_ohlc = {"open", "high", "low", "close"}
+    if not required_ohlc.issubset(df.columns):
+        missing = sorted(required_ohlc - set(df.columns))
+        log.warning(f"Skipping trade-outcome labels: missing OHLC columns {missing}")
+        df[MTL_R_MULTIPLE] = np.nan
+        df[MTL_LABEL] = np.nan
+        return df
+
     if "sma_20" in df.columns:
         direction = np.where(df["close"] >= df["sma_20"], 1, -1)
     elif "pct_from_sma20" in df.columns:

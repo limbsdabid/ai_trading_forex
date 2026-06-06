@@ -1,31 +1,32 @@
 === ML Filter Unified MTL Training Report ===
-Symbols: USDJPY, AUDUSD, USDCAD, NZDUSD, USDCHF, GBPUSD, EURUSD
-Total samples: 33260 (train=23282, val=4986, test=4992)
-Test AUC: 0.553
-Test Accuracy: 0.536
+Symbols: USDCHF, USDJPY, GBPUSD, USDCAD, AUDUSD, NZDUSD
+Total samples: 29628 (train=20736, val=4446, test=4446)
+Test AUC: 0.535
+Test Accuracy: 0.538
+Test Expectancy: -0.034R
+Test WR: 35.4% | Avg Win: 1.64R | Avg Loss: 0.95R
 
 Per-symbol test performance:
-  EURUSD: AUC=0.562 | WR=42.3% (534 samples)
-  GBPUSD: AUC=0.556 | WR=48.5% (743 samples)
-  USDJPY: AUC=0.575 | WR=56.3% (743 samples)
-  USDCHF: AUC=0.573 | WR=51.8% (743 samples)
-  AUDUSD: AUC=0.519 | WR=48.6% (743 samples)
-  USDCAD: AUC=0.545 | WR=54.5% (743 samples)
-  NZDUSD: AUC=0.510 | WR=47.2% (743 samples)
+  GBPUSD: AUC=0.566 | WR=37.7% | Exp=0.039R | AvgW=1.68R | AvgL=0.95R (741 samples)
+  USDJPY: AUC=0.530 | WR=30.0% | Exp=-0.216R | AvgW=1.50R | AvgL=0.95R (741 samples)
+  USDCHF: AUC=0.578 | WR=35.1% | Exp=-0.055R | AvgW=1.62R | AvgL=0.96R (741 samples)
+  AUDUSD: AUC=0.513 | WR=34.8% | Exp=-0.040R | AvgW=1.69R | AvgL=0.96R (741 samples)
+  USDCAD: AUC=0.521 | WR=34.7% | Exp=-0.056R | AvgW=1.62R | AvgL=0.95R (741 samples)
+  NZDUSD: AUC=0.503 | WR=40.5% | Exp=0.124R | AvgW=1.72R | AvgL=0.96R (741 samples)
 
 Feature Importances (Top 15):
-  volume_ratio                   0.0637
-  pair_id_eurusd                 0.0501
-  return_1                       0.0434
-  pair_id_usdjpy                 0.0409
-  pair_id_usdcad                 0.0378
-  dow                            0.0372
-  momentum_alignment             0.0371
-  rsi                            0.0362
-  pair_id_gbpusd                 0.0361
-  usd_index_strength             0.0359
-  return_5                       0.0354
-  atr_pct                        0.0350
-  bb_position                    0.0350
-  trend_strength                 0.0340
-  bb_width                       0.0340
+  vol_spike                      0.0569
+  pair_id_usdcad                 0.0442
+  momentum_alignment             0.0423
+  pair_id_usdchf                 0.0406
+  volume_ratio                   0.0403
+  dow                            0.0399
+  pair_id_nzdusd                 0.0392
+  cross_correlation_gbp          0.0377
+  pair_id_gbpusd                 0.0376
+  macd_hist                      0.0370
+  bb_position                    0.0366
+  pair_id_usdjpy                 0.0363
+  bb_width                       0.0363
+  cross_correlation_usd          0.0362
+  pair_correlation               0.0362
