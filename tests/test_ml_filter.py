@@ -68,6 +68,8 @@ def test_mtl_returns_neutral_when_pair_cache_incomplete():
 def test_ab_logging_writes_expected_columns(tmp_path, monkeypatch):
     monkeypatch.setattr(ml_filter, "LOGS_DIR", tmp_path)
     monkeypatch.setattr(ml_filter, "AB_TEST_LOG", tmp_path / "ab_test_scores.csv")
+    notify = Mock()
+    monkeypatch.setattr(ml_filter, "send_telegram_message", notify)
 
     filt = MLFilter(symbol="EURUSD")
     filt._log_ab("EURUSD", 0.61, 0.57, "BUY")
@@ -77,3 +79,6 @@ def test_ab_logging_writes_expected_columns(tmp_path, monkeypatch):
 
     assert rows[0] == ["timestamp", "symbol", "old_score", "mtl_score", "signal_type"]
     assert rows[1][1:] == ["EURUSD", "0.61", "0.57", "BUY"]
+    notify.assert_called_once_with(
+        "🤖 MTL Shadow Signal: EURUSD | Action: BUY | Prob: 57.0%"
+    )
