@@ -268,7 +268,12 @@ class SMCStrategy(Strategy):
     # Main signal generation
     # ─────────────────────────────────────────────────────────────────────────
 
-    def generate_signal(self, data: pd.DataFrame, symbol: str) -> Signal:
+    def generate_signal(
+        self,
+        data: pd.DataFrame,
+        symbol: str,
+        h1_data: pd.DataFrame | None = None,
+    ) -> Signal:
 
         if self.data_provider is None:
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
@@ -278,7 +283,7 @@ class SMCStrategy(Strategy):
         m5  = self._fetch_data(symbol, 'M5',  500)
         # [FIX-ML-2] 200 H1 bars (was 100) to match training-time lookback so
         # rolling / lagged features are fully populated on the most recent row.
-        h1  = self._fetch_data(symbol, 'H1',  200)
+        h1  = h1_data if h1_data is not None else self._fetch_data(symbol, 'H1',  200)
         if h1 is not None:
             MLFilter.update_global_pair_cache(symbol, h1)
 
