@@ -36,14 +36,14 @@ def pair_correlation(symbol: str, df: pd.DataFrame, all_symbols_data: dict[str, 
     pd.Series
         Correlation values [-1, 1], aligned with df.index
     """
-    returns_this = df["close"].pct_change()
+    returns_this = df["close"].pct_change(fill_method=None)
 
     other_symbols = [s for s in all_symbols_data.keys() if s != symbol]
     if not other_symbols:
         return pd.Series(0.0, index=df.index)
 
     other_returns = pd.concat(
-        [all_symbols_data[s]["close"].pct_change() for s in other_symbols],
+        [all_symbols_data[s]["close"].pct_change(fill_method=None) for s in other_symbols],
         axis=1
     )
     avg_other = other_returns.mean(axis=1)
@@ -92,8 +92,8 @@ def usd_index_strength(all_symbols_data: dict[str, pd.DataFrame]) -> pd.Series:
         idx = closes_w.index if not closes_w.empty else closes_s.index
         return pd.Series(0.0, index=idx)
 
-    weak_rets   = closes_w.pct_change()
-    strong_rets = closes_s.pct_change()
+    weak_rets   = closes_w.pct_change(fill_method=None)
+    strong_rets = closes_s.pct_change(fill_method=None)
 
     index = weak_rets.mean(axis=1) - strong_rets.mean(axis=1)
     return index.fillna(0.0)
@@ -104,8 +104,8 @@ def cross_correlation_eur(symbol: str, all_symbols_data: dict[str, pd.DataFrame]
     if symbol == "EURUSD" or "EURUSD" not in all_symbols_data:
         return pd.Series(0.0, index=all_symbols_data.get(symbol, pd.DataFrame()).index)
 
-    returns_this = all_symbols_data[symbol]["close"].pct_change()
-    returns_eur = all_symbols_data["EURUSD"]["close"].pct_change()
+    returns_this = all_symbols_data[symbol]["close"].pct_change(fill_method=None)
+    returns_eur = all_symbols_data["EURUSD"]["close"].pct_change(fill_method=None)
 
     corr = returns_this.rolling(window).corr(returns_eur)
     return corr.fillna(0.0)
@@ -116,8 +116,8 @@ def cross_correlation_gbp(symbol: str, all_symbols_data: dict[str, pd.DataFrame]
     if symbol == "GBPUSD" or "GBPUSD" not in all_symbols_data:
         return pd.Series(0.0, index=all_symbols_data.get(symbol, pd.DataFrame()).index)
 
-    returns_this = all_symbols_data[symbol]["close"].pct_change()
-    returns_gbp = all_symbols_data["GBPUSD"]["close"].pct_change()
+    returns_this = all_symbols_data[symbol]["close"].pct_change(fill_method=None)
+    returns_gbp = all_symbols_data["GBPUSD"]["close"].pct_change(fill_method=None)
 
     corr = returns_this.rolling(window).corr(returns_gbp)
     return corr.fillna(0.0)
@@ -128,10 +128,10 @@ def cross_correlation_usd(symbol: str, all_symbols_data: dict[str, pd.DataFrame]
     Correlation with USD strength pairs (USDJPY, USDCHF, USDCAD average).
     """
     usd_pairs = ["USDJPY", "USDCHF", "USDCAD"]
-    returns_this = all_symbols_data.get(symbol, pd.DataFrame()).get("close", pd.Series()).pct_change()
+    returns_this = all_symbols_data.get(symbol, pd.DataFrame()).get("close", pd.Series()).pct_change(fill_method=None)
 
     usd_returns = pd.concat(
-        [all_symbols_data.get(s, pd.DataFrame()).get("close", pd.Series()).pct_change() for s in usd_pairs],
+        [all_symbols_data.get(s, pd.DataFrame()).get("close", pd.Series()).pct_change(fill_method=None) for s in usd_pairs],
         axis=1
     )
 

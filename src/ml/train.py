@@ -55,6 +55,10 @@ FEATURES_MTL = FEATURES + [
     "cross_correlation_usd",
     "pair_id_eurusd", "pair_id_gbpusd", "pair_id_usdjpy",
     "pair_id_usdchf", "pair_id_audusd", "pair_id_usdcad", "pair_id_nzdusd",
+    "is_london_session",
+    "is_ny_session",
+    "hour_sin",
+    "hour_cos",
 ]
 
 PAIR_ENCODER = {
@@ -78,6 +82,23 @@ def _session(h: int) -> int:
     if 12 <= h < 16: return 3   # Overlap
     if 16 <= h < 20: return 1   # NY
     return 2                     # Asian
+
+
+def add_session_dynamics(df: pd.DataFrame) -> pd.DataFrame:
+    """Add UTC forex session and cyclic hour features from the datetime index."""
+    df = df.copy()
+    if hasattr(df.index, "hour"):
+        hour = pd.Index(df.index.hour).astype(float)
+        df["is_london_session"] = ((hour >= 8) & (hour < 16)).astype(int)
+        df["is_ny_session"] = ((hour >= 13) & (hour < 21)).astype(int)
+        df["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
+        df["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
+    else:
+        df["is_london_session"] = 0
+        df["is_ny_session"] = 0
+        df["hour_sin"] = 0.0
+        df["hour_cos"] = 1.0
+    return df
 
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -129,6 +150,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["session"] = 0
         df["dow"]     = 0
+    df = add_session_dynamics(df)
 
     df["momentum_alignment"] = (
         (df["macd_hist"] > 0).astype(int) +
@@ -251,6 +273,56 @@ def expectancy_from_r(r_values: pd.Series) -> tuple[float, float, float, float]:
     return float(expectancy), float(win_rate), float(avg_win_r), float(avg_loss_r)
 
 
+def trading_expectancy_score(
+    probabilities: np.ndarray | pd.Series,
+    r_values: pd.Series,
+    threshold: float = 0.5,
+    min_trades: int = 50,
+) -> tuple[float, float, float, float, int]:
+    """Score only validation rows the model would trade at the threshold."""
+    probabilities = np.asarray(probabilities)
+    r_values = pd.Series(r_values).reset_index(drop=True)
+    trade_mask = probabilities >= threshold
+    trades = r_values[trade_mask].dropna()
+    if len(trades) < min_trades:
+        return -999.0, 0.0, 0.0, 0.0, int(len(trades))
+
+    expectancy, win_rate, avg_win_r, avg_loss_r = expectancy_from_r(trades)
+    return expectancy, win_rate, avg_win_r, avg_loss_r, int(len(trades))
+
+
+def best_expectancy_threshold(
+    probabilities: np.ndarray | pd.Series,
+    r_values: pd.Series,
+    thresholds: np.ndarray | None = None,
+    min_trades: int = 50,
+) -> tuple[float, float, float, float, float, int]:
+    """Find the threshold that maximizes validation trading expectancy."""
+    if thresholds is None:
+        thresholds = np.arange(0.40, 0.76, 0.05)
+
+    best = (-999.0, 0.5, 0.0, 0.0, 0.0, 0)
+    for threshold in thresholds:
+        expectancy, win_rate, avg_win_r, avg_loss_r, trades = trading_expectancy_score(
+            probabilities,
+            r_values,
+            threshold=float(threshold),
+            min_trades=min_trades,
+        )
+        if expectancy > best[0]:
+            best = (expectancy, float(threshold), win_rate, avg_win_r, avg_loss_r, trades)
+    return best
+
+
+def conservative_generalization_score(train_exp: float, val_exp: float) -> float:
+    """Favor positive, stable validation expectancy over train-only peaks."""
+    both_positive_bonus = 10.0 if train_exp > 0 and val_exp > 0 else 0.0
+    worst_side = min(train_exp, val_exp)
+    dropoff = abs(train_exp - val_exp)
+    val_penalty = abs(val_exp) * 5.0 if val_exp <= 0 else 0.0
+    return both_positive_bonus + (2.0 * worst_side) - dropoff - val_penalty
+
+
 def load_all_symbols(symbols: list[str]) -> dict[str, pd.DataFrame]:
     """Load all symbol data into memory for correlation computation."""
     all_data = {}
@@ -309,6 +381,7 @@ def _add_mtl_extra(df: pd.DataFrame, symbol: str,
             df["session"] = df.index.hour.map(_session)
         if "dow" not in df.columns:
             df["dow"] = df.index.dayofweek
+    df = add_session_dynamics(df)
 
     if "momentum_alignment" not in df.columns:
         df["momentum_alignment"] = (
@@ -727,7 +800,7 @@ def train_all(symbols: list[str]) -> None:
 
 
 def tune_mtl(symbols: list[str]) -> None:
-    """Grid search over MTL hyperparameters to maximise validation AUC."""
+    """Grid search over MTL hyperparameters to maximise validation expectancy."""
     from xgboost import XGBClassifier
     from sklearn.metrics import roc_auc_score
 
@@ -756,16 +829,16 @@ def tune_mtl(symbols: list[str]) -> None:
 
     X, y = combined[FEATURES_MTL], combined[MTL_LABEL].astype(int)
 
-    # Stratified split
-    train_parts, val_parts, test_parts = [], [], []
+    # Chronological stratified split per symbol: 60% train, 20% validation, 20% blind test.
+    train_parts, val_parts, blind_parts = [], [], []
     for sym in set(combined["symbol"]):
         idx = combined["symbol"] == sym
         sub = combined[idx]
         n = len(sub)
-        tr_end, val_end = int(n * 0.70), int(n * 0.85)
+        tr_end, val_end = int(n * 0.60), int(n * 0.80)
         train_parts.append(sub.index[:tr_end])
         val_parts.append(sub.index[tr_end:val_end])
-        test_parts.append(sub.index[val_end:])
+        blind_parts.append(sub.index[val_end:])
 
     def _merge(idxs):
         c = []
@@ -775,34 +848,26 @@ def tune_mtl(symbols: list[str]) -> None:
 
     train_idx = _merge(train_parts)
     val_idx   = _merge(val_parts)
-    test_idx  = _merge(test_parts)
+    blind_idx = _merge(blind_parts)
 
     X_tr, y_tr = X.loc[train_idx], y.loc[train_idx]
     X_val, y_val = X.loc[val_idx], y.loc[val_idx]
-    X_te, y_te = X.loc[test_idx], y.loc[test_idx]
+    X_blind, y_blind = X.loc[blind_idx], y.loc[blind_idx]
+    log.info(f"Split: train={len(X_tr)} | val={len(X_val)} | blind={len(X_blind)}")
 
     scale_pos = y_tr.value_counts().get(0, 1) / y_tr.value_counts().get(1, 1)
 
+    # Conservative grid: shallow trees reduce market-noise memorization.
     param_grid = [
         {"max_depth": d, "learning_rate": lr, "n_estimators": n, "min_child_weight": mw}
-        for d in [4, 6, 8]
-        for lr in [0.01, 0.015, 0.03]
+        for d in [3, 4, 5]
+        for lr in [0.01, 0.015, 0.02]
         for n in [300, 600, 1000]
-        for mw in [10, 15, 20]
-    ]
-    # Limit to a sensible subset
-    param_grid = [
-        {"max_depth": 4, "learning_rate": 0.03,  "n_estimators": 300,  "min_child_weight": 15},
-        {"max_depth": 4, "learning_rate": 0.015, "n_estimators": 600,  "min_child_weight": 15},
-        {"max_depth": 6, "learning_rate": 0.03,  "n_estimators": 300,  "min_child_weight": 15},
-        {"max_depth": 6, "learning_rate": 0.015, "n_estimators": 600,  "min_child_weight": 15},
-        {"max_depth": 6, "learning_rate": 0.01,  "n_estimators": 1000, "min_child_weight": 20},
-        {"max_depth": 8, "learning_rate": 0.03,  "n_estimators": 300,  "min_child_weight": 20},
-        {"max_depth": 8, "learning_rate": 0.015, "n_estimators": 600,  "min_child_weight": 20},
-        {"max_depth": 8, "learning_rate": 0.01,  "n_estimators": 1000, "min_child_weight": 20},
+        for mw in [15, 20]
     ]
 
-    best_score, best_params = 0.0, {}
+    best_score, best_params, best_threshold = -999.0, {}, 0.5
+    best_train_exp, best_val_exp = 0.0, 0.0
 
     for params in param_grid:
         log.info(f"Trying {params}")
@@ -821,24 +886,44 @@ def tune_mtl(symbols: list[str]) -> None:
 
         val_proba = model.predict_proba(X_val)[:, 1]
         val_auc   = roc_auc_score(y_val, val_proba)
-        te_proba  = model.predict_proba(X_te)[:, 1]
-        te_auc    = roc_auc_score(y_te, te_proba)
-        te_exp, te_wr, te_avg_win, te_avg_loss = expectancy_from_r(
-            combined.loc[test_idx, MTL_R_MULTIPLE]
+        val_exp, val_threshold, val_wr, val_avg_win, val_avg_loss, val_trades = best_expectancy_threshold(
+            val_proba,
+            combined.loc[val_idx, MTL_R_MULTIPLE],
+            min_trades=max(50, int(len(X_val) * 0.03)),
         )
+        train_proba = model.predict_proba(X_tr)[:, 1]
+        train_auc = roc_auc_score(y_tr, train_proba)
+        train_exp, train_wr, train_avg_win, train_avg_loss, train_trades = trading_expectancy_score(
+            train_proba,
+            combined.loc[train_idx, MTL_R_MULTIPLE],
+            threshold=val_threshold,
+            min_trades=1,
+        )
+        composite_score = conservative_generalization_score(train_exp, val_exp)
 
         log.info(
-            f"  val_auc={val_auc:.4f}  test_auc={te_auc:.4f}  "
-            f"test_exp={te_exp:.3f}R  wr={te_wr * 100:.1f}%  "
-            f"avgW={te_avg_win:.2f}R  avgL={te_avg_loss:.2f}R  "
+            f"  composite={composite_score:.3f}  "
+            f"train_exp={train_exp:.3f}R  train_wr={train_wr * 100:.1f}%  "
+            f"train_auc={train_auc:.4f}  train_trades={train_trades}  "
+            f"  val_exp={val_exp:.3f}R  val_wr={val_wr * 100:.1f}%  "
+            f"val_avgW={val_avg_win:.2f}R  val_avgL={val_avg_loss:.2f}R  "
+            f"threshold={val_threshold:.2f}  val_trades={val_trades}  "
+            f"val_auc={val_auc:.4f}  "
             f"best_iter={model.best_iteration + 1}"
         )
 
-        if val_auc > best_score:
-            best_score = val_auc
+        if composite_score > best_score:
+            best_score = composite_score
             best_params = params
+            best_threshold = val_threshold
+            best_train_exp = train_exp
+            best_val_exp = val_exp
 
-    log.info(f"=== Best: val_auc={best_score:.4f}  params={best_params} ===")
+    log.info(
+        f"=== Best generalized params: composite={best_score:.3f}  "
+        f"train_expectancy={best_train_exp:.3f}R  val_expectancy={best_val_exp:.3f}R  "
+        f"threshold={best_threshold:.2f}  params={best_params} ==="
+    )
 
     # Train final model with best params
     log.info("Training final model with best params...")
@@ -854,14 +939,18 @@ def tune_mtl(symbols: list[str]) -> None:
         verbosity=0,
     )
     final.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
-    te_proba = final.predict_proba(X_te)[:, 1]
-    te_auc   = roc_auc_score(y_te, te_proba)
-    te_exp, te_wr, te_avg_win, te_avg_loss = expectancy_from_r(
-        combined.loc[test_idx, MTL_R_MULTIPLE]
+    blind_proba = final.predict_proba(X_blind)[:, 1]
+    blind_auc = roc_auc_score(y_blind, blind_proba)
+    blind_exp, blind_wr, blind_avg_win, blind_avg_loss, blind_trades = trading_expectancy_score(
+        blind_proba,
+        combined.loc[blind_idx, MTL_R_MULTIPLE],
+        threshold=best_threshold,
+        min_trades=1,
     )
     log.info(
-        f"Final test AUC: {te_auc:.4f} | expectancy={te_exp:.3f}R | "
-        f"WR={te_wr * 100:.1f}% | AvgW={te_avg_win:.2f}R | AvgL={te_avg_loss:.2f}R"
+        f"Final BLIND test AUC: {blind_auc:.4f} | expectancy={blind_exp:.3f}R | "
+        f"WR={blind_wr * 100:.1f}% | AvgW={blind_avg_win:.2f}R | AvgL={blind_avg_loss:.2f}R | "
+        f"threshold={best_threshold:.2f} | trades={blind_trades}"
     )
 
     joblib.dump(final, MODELS_DIR / "mtl_filter.pkl")
