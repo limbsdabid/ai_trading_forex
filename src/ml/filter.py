@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from src.ml import correlations
+from src.utils.telegram import send_telegram_message
 
 log = logging.getLogger("trading_bot")
 
@@ -420,5 +421,10 @@ class MLFilter:
                     round(mtl_score, 4),
                     signal_type,
                 ])
+            if signal_type.upper() in {"BUY", "SELL"}:
+                send_telegram_message(
+                    "🤖 MTL Shadow Signal: "
+                    f"{symbol} | Action: {signal_type.upper()} | Prob: {mtl_score * 100:.1f}%"
+                )
         except Exception as e:
             log.debug(f"A/B log write failed: {e}")

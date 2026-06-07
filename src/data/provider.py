@@ -48,6 +48,17 @@ class DataProvider:
                                  server=self.mt5_server):
                     mt5.shutdown()
                     return False
+            account_info = mt5.account_info()
+            if account_info is None:
+                mt5.shutdown()
+                return False
+            if self.mt5_login and int(account_info.login) != int(self.mt5_login):
+                mt5.shutdown()
+                raise ValueError(
+                    "MT5 account mismatch: terminal is logged into "
+                    f"{account_info.login}, but MT5_LOGIN is {self.mt5_login}. "
+                    "Open/login to the correct MT5 account before running the bot."
+                )
             import time
             time.sleep(1)
             for sym in FOREX_MAJORS:

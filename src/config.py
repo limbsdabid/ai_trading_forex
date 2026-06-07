@@ -7,16 +7,8 @@ load_dotenv()
 
 
 def _load_secret(service: str, key: str, env_var: str, default: str = "") -> str:
-    """Read sensitive config from env first, then Windows Credential Manager."""
-    env_value = os.getenv(env_var)
-    if env_value:
-        return env_value
-
-    try:
-        import keyring
-        return keyring.get_password(service, key) or default
-    except Exception:
-        return default
+    """Read sensitive config from environment variables (.env file)."""
+    return os.getenv(env_var, default)
 
 
 @dataclass
