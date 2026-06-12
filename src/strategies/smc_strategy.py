@@ -17,6 +17,8 @@ _log = logging.getLogger("trading_bot")
 SPREAD_COST = 0.0001
 NEAR_ZONE_ATR_MULTIPLIER = 0.25
 SETUP_EXPIRY_M5_CANDLES = 6
+MIN_RISK_REWARD_RATIO = 2.0
+MIN_SL_PIPS = 10
 
 
 @dataclass
@@ -209,6 +211,81 @@ def get_next_liquidity(m5_avail, bias):
 # ─────────────────────────────────────────────────────────────────────────────
 # SMCStrategy
 # ─────────────────────────────────────────────────────────────────────────────
+
+def pip_size_for_symbol(symbol: str) -> float:
+    return 0.01 if "JPY" in symbol.upper() else 0.0001
+
+
+def calculate_tp_sl(
+    m5: pd.DataFrame,
+    bias: str,
+    price: float,
+    symbol: str,
+    min_rr: float = MIN_RISK_REWARD_RATIO,
+) -> dict:
+    pip_size = pip_size_for_symbol(symbol)
+    m5_highs, m5_lows = find_swings(m5)
+
+    if bias == 'bullish' and len(m5_lows) > 0:
+        raw_sl = m5_lows['p'].iloc[-1] - pip_size
+    elif bias == 'bearish' and len(m5_highs) > 0:
+        raw_sl = m5_highs['p'].iloc[-1] + pip_size
+    else:
+        raw_sl = (
+            price - MIN_SL_PIPS * pip_size
+            if bias == 'bullish'
+            else price + MIN_SL_PIPS * pip_size
+        )
+
+    sl_pips = abs(price - raw_sl) / pip_size
+    sl_pips = max(round(sl_pips) + 1, MIN_SL_PIPS)
+
+    sl = (
+        price - sl_pips * pip_size
+        if bias == 'bullish'
+        else price + sl_pips * pip_size
+    )
+
+    fallback_tp = (
+        price + sl_pips * min_rr * pip_size
+        if bias == 'bullish'
+        else price - sl_pips * min_rr * pip_size
+    )
+
+    liquidity_price = get_next_liquidity(m5, bias)
+    tp = fallback_tp
+    tp_source = "fallback_min_rr"
+
+    if liquidity_price is not None:
+        valid_liquidity = (
+            liquidity_price > price
+            if bias == 'bullish'
+            else liquidity_price < price
+        )
+
+        if valid_liquidity:
+            tp_distance_pips = abs(liquidity_price - price) / pip_size
+            liquidity_rr = tp_distance_pips / sl_pips if sl_pips > 0 else 0.0
+
+            if liquidity_rr >= min_rr:
+                tp = liquidity_price
+                tp_source = "liquidity"
+            else:
+                tp = fallback_tp
+                tp_source = "liquidity_too_close_adjusted"
+
+    tp_pips = abs(tp - price) / pip_size
+    rr = tp_pips / sl_pips if sl_pips > 0 else 0.0
+
+    return {
+        'sl': sl,
+        'tp': tp,
+        'sl_pips': sl_pips,
+        'tp_pips': tp_pips,
+        'rr': rr,
+        'tp_source': tp_source,
+    }
+
 
 class SMCStrategy(Strategy):
 
@@ -530,33 +607,23 @@ class SMCStrategy(Strategy):
             )
 
         # ── SL / TP calculation ───────────────────────────────────────────────
-        m5_highs, m5_lows = find_swings(m5)
+        tp_sl = calculate_tp_sl(
+            m5=m5,
+            bias=bias,
+            price=price,
+            symbol=symbol,
+            min_rr=MIN_RISK_REWARD_RATIO,
+        )
 
-        if bias == 'bullish' and len(m5_lows) > 0:
-            sl_price = m5_lows['p'].iloc[-1] - 0.0001
-        elif bias == 'bearish' and len(m5_highs) > 0:
-            sl_price = m5_highs['p'].iloc[-1] + 0.0001
-        else:
-            sl_price = price - 0.0001 if bias == 'bullish' else price + 0.0001
+        sl = tp_sl['sl']
+        tp = tp_sl['tp']
+        sl_pips = tp_sl['sl_pips']
 
-        sl_pips = abs(price - sl_price) * 10000
-        sl_pips = max(round(sl_pips) + 1, 10)
-
-        liquidity_price = get_next_liquidity(m5, bias)
-        if liquidity_price is not None:
-            tp_price = liquidity_price
-            if bias == 'bullish' and tp_price <= price:
-                tp_price = price + sl_pips * 2 * 0.0001
-            elif bias == 'bearish' and tp_price >= price:
-                tp_price = price - sl_pips * 2 * 0.0001
-        else:
-            tp_price = (
-                price + sl_pips * 2 * 0.0001 if bias == 'bullish'
-                else price - sl_pips * 2 * 0.0001
-            )
-
-        sl = price - sl_pips * 0.0001 if bias == 'bullish' else price + sl_pips * 0.0001
-        tp = tp_price
+        _log.info(
+            f"{symbol}: [TP_SL] sl={sl:.5f} tp={tp:.5f} "
+            f"sl_pips={tp_sl['sl_pips']:.1f} tp_pips={tp_sl['tp_pips']:.1f} "
+            f"rr={tp_sl['rr']:.2f} source={tp_sl['tp_source']}"
+        )
 
         # ── Position sizing ───────────────────────────────────────────────────
         sizing = self.risk_manager.calculate_size(
@@ -572,7 +639,7 @@ class SMCStrategy(Strategy):
         # Blend SMC structural confidence (0.7 base) with ML score (0–1)
         confidence = round(0.5 * 0.7 + 0.5 * ml_score, 3)
 
-        setup = self._setups.get(symbol)
+        setup = self._setups.pop(symbol, None)
         if setup:
             setup.state = "EXECUTED"
 
@@ -591,6 +658,9 @@ class SMCStrategy(Strategy):
                 'sl':        sl,
                 'tp':        tp,
                 'sl_pips':   sl_pips,
+                'tp_pips':   tp_sl['tp_pips'],
+                'rr':        tp_sl['rr'],
+                'tp_source': tp_sl['tp_source'],
                 'volume':    sizing.volume,
                 'bias':      bias,
                 'entry':     price,
