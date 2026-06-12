@@ -1,5 +1,6 @@
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -14,6 +15,23 @@ from src.ml.filter import MLFilter
 _log = logging.getLogger("trading_bot")
 
 SPREAD_COST = 0.0001
+NEAR_ZONE_ATR_MULTIPLIER = 0.25
+SETUP_EXPIRY_M5_CANDLES = 6
+
+
+@dataclass
+class SetupMemory:
+    symbol: str
+    bias: str
+    state: str
+    zone_status: str
+    zone_top: float
+    zone_bot: float
+    zone_mid: float
+    created_at: object
+    last_m5_time: object
+    candles_waited: int = 0
+    expires_after: int = SETUP_EXPIRY_M5_CANDLES
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,6 +232,15 @@ class SMCStrategy(Strategy):
         # Key insight: each symbol needs its own MLFilter instance that loads
         # the matching {SYMBOL}_ml_filter.pkl model file.
         self._ml_filters: dict[str, MLFilter] = {}
+        self._setups: dict[str, SetupMemory] = {}
+        self._gate_stats = {
+            "G4_PASS": 0,
+            "G4_NEAR": 0,
+            "G4_FAIL": 0,
+            "G5_PASS": 0,
+            "G5_WAIT": 0,
+            "G5_EXPIRED": 0,
+        }
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers
@@ -222,6 +249,74 @@ class SMCStrategy(Strategy):
     def _get_threshold(self, symbol: str) -> float:
         """Return the ML threshold for a symbol, falling back to ml_threshold."""
         return self.ml_thresholds.get(symbol.upper(), self.ml_threshold)
+
+    def _zone_distance(self, price: float, zone: pd.Series) -> float:
+        if zone["bot"] <= price <= zone["top"]:
+            return 0.0
+        return min(abs(price - zone["bot"]), abs(price - zone["top"]))
+
+    def _latest_atr(self, df: pd.DataFrame, fallback: float = 0.0005) -> float:
+        try:
+            atr = self._atr(df, 14).dropna()
+            if len(atr) > 0 and atr.iloc[-1] > 0:
+                return float(atr.iloc[-1])
+        except Exception:
+            pass
+        return fallback
+
+    def _remember_setup(
+        self,
+        symbol: str,
+        bias: str,
+        zone_status: str,
+        zone: pd.Series,
+        m5_time,
+    ) -> SetupMemory:
+        setup = self._setups.get(symbol)
+
+        if setup is None or setup.bias != bias:
+            setup = SetupMemory(
+                symbol=symbol,
+                bias=bias,
+                state="WAITING_FOR_CHOCH",
+                zone_status=zone_status,
+                zone_top=float(zone["top"]),
+                zone_bot=float(zone["bot"]),
+                zone_mid=float(zone["mid"]),
+                created_at=m5_time,
+                last_m5_time=m5_time,
+            )
+            self._setups[symbol] = setup
+            _log.info(
+                f"{symbol}: [SETUP_CREATED] bias={bias} zone={zone_status} "
+                f"top={setup.zone_top:.5f} bot={setup.zone_bot:.5f}"
+            )
+        elif m5_time != setup.last_m5_time:
+            setup.candles_waited += 1
+            setup.last_m5_time = m5_time
+
+        return setup
+
+    def _expire_setup(self, symbol: str, reason: str) -> None:
+        setup = self._setups.pop(symbol, None)
+        if setup:
+            setup.state = "EXPIRED"
+            self._gate_stats["G5_EXPIRED"] += 1
+            _log.info(
+                f"{symbol}: [SETUP_EXPIRED] reason={reason} "
+                f"waited={setup.candles_waited}/{setup.expires_after}"
+            )
+
+    def _log_gate_summary(self, symbol: str) -> None:
+        _log.info(
+            f"{symbol}: [GATE_SUMMARY] "
+            f"G4_PASS={self._gate_stats['G4_PASS']} "
+            f"G4_NEAR={self._gate_stats['G4_NEAR']} "
+            f"G4_FAIL={self._gate_stats['G4_FAIL']} "
+            f"G5_PASS={self._gate_stats['G5_PASS']} "
+            f"G5_WAIT={self._gate_stats['G5_WAIT']} "
+            f"G5_EXPIRED={self._gate_stats['G5_EXPIRED']}"
+        )
 
     def _get_ml_filter(self, symbol: str) -> MLFilter:
         """
@@ -316,32 +411,78 @@ class SMCStrategy(Strategy):
             f"(OBs={len(obs)} FVGs={len(fvgs)})"
         )
 
-        # ── Gate 4: Price in Zone ────────────────────────────────────────────
-        price        = m5['close'].iloc[-1]
+        # ── Gate 4: Price in Zone / Near Zone ────────────────────────────────
+        price = m5['close'].iloc[-1]
+        m5_time = m5.index[-1]
+        m5_atr = self._latest_atr(m5)
         recent_zones = zones[zones['t'] >= m15.index[-100]]   # ~25-hour window
-        in_zone      = False
-        for _, z in recent_zones.iterrows():
-            if z['bot'] <= price <= z['top']:
-                in_zone = True
-                break
+        zone_pool = recent_zones if len(recent_zones) > 0 else zones
 
-        if not in_zone:
-            nearest = (
-                min(abs(price - z['mid']) for _, z in zones.iterrows())
-                if len(zones) > 0 else 0
-            )
+        nearest_zone = None
+        nearest_distance = float("inf")
+        for _, z in zone_pool.iterrows():
+            distance = self._zone_distance(price, z)
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_zone = z
+
+        if nearest_zone is None:
+            self._gate_stats["G4_FAIL"] += 1
+            self._expire_setup(symbol, "no_valid_zone")
+            _log.info(f"{symbol}: [G4-FAIL] No usable zone")
+            self._log_gate_summary(symbol)
+            return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
+
+        if nearest_distance == 0.0:
+            zone_status = "PASS"
+            self._gate_stats["G4_PASS"] += 1
             _log.info(
-                f"{symbol}: [G4-FAIL] Price {price:.5f} not in zone — "
-                f"nearest={nearest:.5f} ({len(recent_zones)} recent zones)"
+                f"{symbol}: [G4-PASS] Price {price:.5f} inside zone "
+                f"top={nearest_zone['top']:.5f} bot={nearest_zone['bot']:.5f}"
             )
+        elif nearest_distance <= m5_atr * NEAR_ZONE_ATR_MULTIPLIER:
+            zone_status = "NEAR"
+            self._gate_stats["G4_NEAR"] += 1
+            _log.info(
+                f"{symbol}: [G4-NEAR] Price {price:.5f} near zone "
+                f"distance={nearest_distance:.5f} atr={m5_atr:.5f} "
+                f"limit={m5_atr * NEAR_ZONE_ATR_MULTIPLIER:.5f}"
+            )
+        else:
+            self._gate_stats["G4_FAIL"] += 1
+            self._expire_setup(symbol, "price_too_far_from_zone")
+            _log.info(
+                f"{symbol}: [G4-FAIL] Price {price:.5f} too far from zone "
+                f"distance={nearest_distance:.5f} atr={m5_atr:.5f} "
+                f"recent_zones={len(recent_zones)}"
+            )
+            self._log_gate_summary(symbol)
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
-        _log.info(f"{symbol}: [G4-PASS] Price {price:.5f} inside zone")
 
-        # ── Gate 5: M5 CHoCH ─────────────────────────────────────────────────
-        if not detect_choch_m5(m5, bias):
-            _log.info(f"{symbol}: [G5-FAIL] No CHoCH on M5 for bias={bias}")
+        setup = self._remember_setup(symbol, bias, zone_status, nearest_zone, m5_time)
+
+        # ── Gate 5: M5 CHoCH confirmation with setup memory ──────────────────
+        if setup.candles_waited > setup.expires_after:
+            self._expire_setup(symbol, "choch_timeout")
+            self._log_gate_summary(symbol)
             return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
-        _log.info(f"{symbol}: [G5-PASS] CHoCH confirmed on M5")
+
+        if not detect_choch_m5(m5, bias):
+            setup.state = "WAITING_FOR_CHOCH"
+            self._gate_stats["G5_WAIT"] += 1
+            _log.info(
+                f"{symbol}: [CHOCH_WAITING] bias={bias} zone={zone_status} "
+                f"waited={setup.candles_waited}/{setup.expires_after}"
+            )
+            self._log_gate_summary(symbol)
+            return Signal(type=SignalType.HOLD, symbol=symbol, confidence=0.0)
+
+        setup.state = "READY_TO_TRADE"
+        self._gate_stats["G5_PASS"] += 1
+        _log.info(
+            f"{symbol}: [G5-PASS] CHoCH confirmed after "
+            f"{setup.candles_waited}/{setup.expires_after} M5 candles"
+        )
 
         # ── Gate 6: ML Filter ────────────────────────────────────────────────
         # Runs after all SMC structural gates pass so model inference is only
@@ -430,6 +571,17 @@ class SMCStrategy(Strategy):
 
         # Blend SMC structural confidence (0.7 base) with ML score (0–1)
         confidence = round(0.5 * 0.7 + 0.5 * ml_score, 3)
+
+        setup = self._setups.get(symbol)
+        if setup:
+            setup.state = "EXECUTED"
+
+        _log.info(
+            f"{symbol}: [TRADE_EXECUTED] direction={direction.upper()} "
+            f"entry={price:.5f} sl={sl:.5f} tp={tp:.5f} "
+            f"ml_score={ml_score:.3f} confidence={confidence:.3f}"
+        )
+        self._log_gate_summary(symbol)
 
         return Signal(
             type=signal_type,
