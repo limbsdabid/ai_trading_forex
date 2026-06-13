@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from src.data.provider import DataProvider, FOREX_MAJORS
 from src.config import Config
+from src.ml.setup_labels import add_smc_setup_labels
 from src.ml.train import add_features
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -54,6 +55,18 @@ BASE_FEATURE_COLUMNS = [
     "hour_sin",
     "hour_cos",
 ]
+SETUP_LABEL_COLUMNS = [
+    "g2_bias",
+    "g2_pass",
+    "g3_zones",
+    "g3_pass",
+    "g4_status",
+    "g4_distance_atr",
+    "setup_candidate",
+    "setup_choch_within_6",
+    "setup_choch_age",
+    "setup_ready_to_trade",
+]
 
 
 def existing_file_has_ohlc(path: Path) -> bool:
@@ -86,20 +99,35 @@ def export_symbol(provider: DataProvider, symbol: str, timeframe: str, bars: int
     if missing_ohlc:
         raise ValueError(f"{symbol}: fetched data missing OHLC columns {missing_ohlc}")
 
+    timeframe_upper = timeframe.upper()
+    if timeframe_upper == "H1":
+        h4_data = provider.fetch_rates(symbol, "H4", max(400, bars // 4 + 300))
+        m15_data = provider.fetch_rates(symbol, "M15", bars * 4 + 1000)
+        m5_data = provider.fetch_rates(symbol, "M5", bars * 12 + 500)
+        if h4_data is None or m15_data is None or m5_data is None:
+            raise RuntimeError(f"{symbol}: failed to fetch setup-label timeframes")
+        df = add_smc_setup_labels(df, h4_data.data, m15_data.data, m5_data.data)
+
     df = add_features(df)
     df = add_target(df)
 
     output_columns = (
         [col for col in RAW_COLUMNS if col in df.columns]
         + BASE_FEATURE_COLUMNS
+        + SETUP_LABEL_COLUMNS
         + ["Target"]
     )
     output_columns = [col for col in output_columns if col in df.columns]
+    required_columns = [
+        col for col in BASE_FEATURE_COLUMNS + ["Target"]
+        if col in df.columns
+    ]
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     out_path = DATA_DIR / f"{symbol}_{timeframe}_ML.csv"
-    df[output_columns].dropna().to_csv(out_path, index_label="time")
-    return len(df)
+    export_df = df[output_columns].dropna(subset=required_columns)
+    export_df.to_csv(out_path, index_label="time")
+    return len(export_df)
 
 
 def parse_args() -> argparse.Namespace:
