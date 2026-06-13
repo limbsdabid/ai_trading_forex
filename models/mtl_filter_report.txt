@@ -1,32 +1,29 @@
-=== ML Filter Unified MTL Training Report ===
-Symbols: USDCHF, USDJPY, GBPUSD, USDCAD, AUDUSD, NZDUSD
-Total samples: 29628 (train=20736, val=4446, test=4446)
-Test AUC: 0.535
-Test Accuracy: 0.538
-Test Expectancy: -0.034R
-Test WR: 35.4% | Avg Win: 1.64R | Avg Loss: 0.95R
+=== Tuned MTL Filter Report ===
+Symbols: EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD
+Total samples: 11679 (train=7005, val=2336, blind=2338)
+Setup-only training: enabled
+Setup filter mode: candidate
+Setup max CHoCH age: 6
+Weak-symbol disabling: enabled (min_val_exp=0.000R)
+Best params: {'max_depth': 3, 'learning_rate': 0.015, 'n_estimators': 300, 'min_child_weight': 20}
+Composite score: 10.249
+Train Expectancy: 0.244R
+Validation Expectancy: 0.164R
+Selected thresholds:
+  AUDUSD: 0.55 | val_exp=0.184R | WR=44.4% | trades=36
+  EURUSD: 0.50 | val_exp=0.060R | WR=43.9% | trades=155
+  GBPUSD: 0.50 | val_exp=0.181R | WR=47.7% | trades=193
+  NZDUSD: 0.55 | val_exp=0.346R | WR=50.0% | trades=20
+  USDCAD: 0.50 | val_exp=0.217R | WR=44.2% | trades=165
+  USDCHF: 1.01 | val_exp=-0.079R | WR=33.5% | trades=179 | DISABLED
+  USDJPY: 1.01 | val_exp=-0.293R | WR=32.1% | trades=56 | DISABLED
 
-Per-symbol test performance:
-  GBPUSD: AUC=0.566 | WR=37.7% | Exp=0.039R | AvgW=1.68R | AvgL=0.95R (741 samples)
-  USDJPY: AUC=0.530 | WR=30.0% | Exp=-0.216R | AvgW=1.50R | AvgL=0.95R (741 samples)
-  USDCHF: AUC=0.578 | WR=35.1% | Exp=-0.055R | AvgW=1.62R | AvgL=0.96R (741 samples)
-  AUDUSD: AUC=0.513 | WR=34.8% | Exp=-0.040R | AvgW=1.69R | AvgL=0.96R (741 samples)
-  USDCAD: AUC=0.521 | WR=34.7% | Exp=-0.056R | AvgW=1.62R | AvgL=0.95R (741 samples)
-  NZDUSD: AUC=0.503 | WR=40.5% | Exp=0.124R | AvgW=1.72R | AvgL=0.96R (741 samples)
+Final Blind Test:
+  AUC: 0.5578
+  Expectancy: 0.158R
+  Win Rate: 45.2%
+  Avg Win: 1.44R
+  Avg Loss: 0.90R
+  Trades: 509
 
-Feature Importances (Top 15):
-  vol_spike                      0.0569
-  pair_id_usdcad                 0.0442
-  momentum_alignment             0.0423
-  pair_id_usdchf                 0.0406
-  volume_ratio                   0.0403
-  dow                            0.0399
-  pair_id_nzdusd                 0.0392
-  cross_correlation_gbp          0.0377
-  pair_id_gbpusd                 0.0376
-  macd_hist                      0.0370
-  bb_position                    0.0366
-  pair_id_usdjpy                 0.0363
-  bb_width                       0.0363
-  cross_correlation_usd          0.0362
-  pair_correlation               0.0362
+Note: Expectancy is calculated only on per-symbol thresholded model trades.

@@ -17,6 +17,8 @@ Writes: models/{SYMBOL}_filter.pkl (per-symbol)
 
 import sys
 import logging
+import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -75,6 +77,14 @@ MTL_LABEL = "trade_outcome"
 MTL_R_MULTIPLE = "forward_r"
 MTL_FORWARD_BARS = 12
 MTL_REWARD_R = 2.0
+SETUP_ONLY_TRAINING = True
+SETUP_FILTER_MODE = os.getenv("SETUP_FILTER_MODE", "candidate").strip().lower()
+SETUP_MAX_CHOCH_AGE = int(os.getenv("SETUP_MAX_CHOCH_AGE", "6"))
+SETUP_MIN_VOLUME_RATIO = 0.8
+SETUP_MIN_ROWS_PER_SYMBOL = 200
+DISABLE_WEAK_SYMBOLS = os.getenv("DISABLE_WEAK_SYMBOLS", "true").strip().lower() in {"1", "true", "yes", "on"}
+MIN_PAIR_VALIDATION_EXPECTANCY = float(os.getenv("MIN_PAIR_VALIDATION_EXPECTANCY", "0.0"))
+DISABLED_SYMBOL_THRESHOLD = 1.01
 
 
 def _session(h: int) -> int:
@@ -168,6 +178,90 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         df["atr_regime"] = 1
     return df
+
+
+def setup_candidate_mask(df: pd.DataFrame) -> pd.Series:
+    """Approximate live SMC setup eligibility from H1 ML features.
+
+    This is a backward-compatible fallback for older CSVs. New exports should
+    include setup_ready_to_trade/setup_candidate from src.ml.setup_labels.
+    """
+    idx = df.index
+    session_ok = (
+        df.get("is_london_session", pd.Series(0, index=idx)).eq(1)
+        | df.get("is_ny_session", pd.Series(0, index=idx)).eq(1)
+    )
+
+    atr_pct = df.get("atr_pct", pd.Series(np.nan, index=idx))
+    atr_regime = df.get("atr_regime", pd.Series(1, index=idx))
+    volatility_ok = atr_regime.ge(1) | atr_pct.ge(atr_pct.median())
+
+    momentum = df.get("momentum_alignment", pd.Series(1, index=idx))
+    rsi_extreme = df.get("rsi_extreme", pd.Series(0, index=idx))
+    bb_position = df.get("bb_position", pd.Series(0.5, index=idx))
+    directional_ok = (
+        momentum.isin([0, 3])
+        | rsi_extreme.eq(1)
+        | bb_position.le(0.20)
+        | bb_position.ge(0.80)
+    )
+
+    volume_ratio = df.get("volume_ratio", pd.Series(1.0, index=idx))
+    liquidity_ok = volume_ratio.ge(SETUP_MIN_VOLUME_RATIO)
+
+    trend_strength = df.get("trend_strength", pd.Series(np.nan, index=idx))
+    trend_ok = trend_strength.ge(trend_strength.median())
+
+    return (session_ok & volatility_ok & directional_ok & liquidity_ok & trend_ok).fillna(False)
+
+
+def filter_setup_candidates(df: pd.DataFrame, symbol: str, context: str) -> pd.DataFrame:
+    """Keep only rows that resemble tradeable setup contexts."""
+    if not SETUP_ONLY_TRAINING:
+        return df
+
+    mask_source = "h1_proxy"
+    if (
+        SETUP_FILTER_MODE == "ready"
+        and "setup_ready_to_trade" in df.columns
+        and df["setup_ready_to_trade"].notna().any()
+    ):
+        mask = df["setup_ready_to_trade"].fillna(0).astype(int).eq(1)
+        mask_source = "exact_setup_ready_to_trade"
+        if "setup_choch_age" in df.columns:
+            age = df["setup_choch_age"].fillna(-1).astype(int)
+            mask = mask & age.between(0, SETUP_MAX_CHOCH_AGE)
+            mask_source = f"{mask_source}_age_lte_{SETUP_MAX_CHOCH_AGE}"
+    elif (
+        SETUP_FILTER_MODE in {"candidate", "ready"}
+        and "setup_candidate" in df.columns
+        and df["setup_candidate"].notna().any()
+    ):
+        mask = df["setup_candidate"].fillna(0).astype(int).eq(1)
+        mask_source = "exact_setup_candidate"
+    else:
+        mask = setup_candidate_mask(df)
+        mask_source = "h1_proxy"
+
+    kept = int(mask.sum())
+    total = len(df)
+    rate = kept / total if total else 0.0
+    log.info(
+        f"{context} {symbol}: setup-only filter [{mask_source}] kept "
+        f"{kept}/{total} rows ({rate:.1%})"
+    )
+
+    df = df.copy()
+    if "setup_candidate" not in df.columns:
+        df["setup_candidate"] = mask.astype(int)
+    if kept < SETUP_MIN_ROWS_PER_SYMBOL:
+        log.warning(
+            f"{context} {symbol}: setup-only filter kept only {kept} rows; "
+            "falling back to full symbol dataset"
+        )
+        return df
+
+    return df.loc[mask].copy()
 
 
 def _find_data(symbol: str) -> Path | None:
@@ -312,6 +406,81 @@ def best_expectancy_threshold(
         if expectancy > best[0]:
             best = (expectancy, float(threshold), win_rate, avg_win_r, avg_loss_r, trades)
     return best
+
+
+def expectancy_with_symbol_thresholds(
+    probabilities: np.ndarray | pd.Series,
+    r_values: pd.Series,
+    symbols: pd.Series,
+    thresholds: dict[str, float],
+    min_trades: int = 50,
+) -> tuple[float, float, float, float, int]:
+    """Score trades using each row's symbol-specific probability threshold."""
+    probabilities = np.asarray(probabilities)
+    r_values = pd.Series(r_values).reset_index(drop=True)
+    symbols = pd.Series(symbols).reset_index(drop=True).str.upper()
+    row_thresholds = symbols.map(lambda s: thresholds.get(s, 0.5)).to_numpy()
+    trade_mask = probabilities >= row_thresholds
+    trades = r_values[trade_mask].dropna()
+    if len(trades) < min_trades:
+        return -999.0, 0.0, 0.0, 0.0, int(len(trades))
+
+    expectancy, win_rate, avg_win_r, avg_loss_r = expectancy_from_r(trades)
+    return expectancy, win_rate, avg_win_r, avg_loss_r, int(len(trades))
+
+
+def best_expectancy_thresholds_by_symbol(
+    probabilities: np.ndarray | pd.Series,
+    r_values: pd.Series,
+    symbols: pd.Series,
+    thresholds: np.ndarray | None = None,
+    min_trades_per_symbol: int = 30,
+) -> tuple[dict[str, float], dict[str, dict], tuple[float, float, float, float, int]]:
+    """Find the best validation threshold for each pair, then aggregate."""
+    if thresholds is None:
+        thresholds = np.arange(0.50, 0.76, 0.05)
+
+    probabilities = np.asarray(probabilities)
+    r_values = pd.Series(r_values).reset_index(drop=True)
+    symbols = pd.Series(symbols).reset_index(drop=True).str.upper()
+
+    best_thresholds: dict[str, float] = {}
+    pair_stats: dict[str, dict] = {}
+
+    for symbol in sorted(symbols.dropna().unique()):
+        mask = symbols == symbol
+        min_trades = max(10, min_trades_per_symbol)
+        exp, threshold, wr, avg_win, avg_loss, trades = best_expectancy_threshold(
+            probabilities[mask.to_numpy()],
+            r_values[mask],
+            thresholds=thresholds,
+            min_trades=min_trades,
+        )
+        best_thresholds[symbol] = threshold
+        disabled = False
+        if DISABLE_WEAK_SYMBOLS and exp < MIN_PAIR_VALIDATION_EXPECTANCY:
+            threshold = DISABLED_SYMBOL_THRESHOLD
+            best_thresholds[symbol] = threshold
+            disabled = True
+
+        pair_stats[symbol] = {
+            "threshold": threshold,
+            "expectancy": exp,
+            "win_rate": wr,
+            "avg_win_R": avg_win,
+            "avg_loss_R": avg_loss,
+            "trades": trades,
+            "disabled": disabled,
+        }
+
+    aggregate = expectancy_with_symbol_thresholds(
+        probabilities,
+        r_values,
+        symbols,
+        best_thresholds,
+        min_trades=sum(1 for _ in best_thresholds) * min_trades_per_symbol,
+    )
+    return best_thresholds, pair_stats, aggregate
 
 
 def conservative_generalization_score(train_exp: float, val_exp: float) -> float:
@@ -469,6 +638,7 @@ def train_unified_model(symbols: list[str]) -> dict | None:
             # Raw OHLCV data — compute all features from scratch
             df = add_features_mtl(df, sym, all_data)
         df = add_trade_outcome_labels(df)
+        df = filter_setup_candidates(df, sym, "MTL train")
         df = df.reset_index()
 
         df["symbol"] = sym
@@ -491,8 +661,8 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         sym_idx = combined_df["symbol"] == sym
         sym_data = combined_df[sym_idx]
         n = len(sym_data)
-        tr_end = int(n * 0.70)
-        val_end = int(n * 0.85)
+        tr_end = int(n * 0.60)
+        val_end = int(n * 0.80)
 
         train_idx = sym_data.index[:tr_end]
         val_idx = sym_data.index[tr_end:val_end]
@@ -526,10 +696,10 @@ def train_unified_model(symbols: list[str]) -> dict | None:
 
     scale_pos = y_tr.value_counts().get(0, 1) / y_tr.value_counts().get(1, 1)
     model = XGBClassifier(
-        n_estimators=1000,
-        max_depth=8,
+        n_estimators=300,
+        max_depth=4,
         learning_rate=0.01,
-        min_child_weight=20,
+        min_child_weight=15,
         subsample=0.7,
         colsample_bytree=0.7,
         gamma=2,
@@ -540,7 +710,7 @@ def train_unified_model(symbols: list[str]) -> dict | None:
         verbosity=0,
     )
 
-    log.info("Training unified MTL model (n_est=1000, depth=8, lr=0.01, mw=20, esr=50)...")
+    log.info("Training unified MTL model (n_est=300, depth=4, lr=0.01, mw=15, esr=50)...")
     model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
 
     proba_te = model.predict_proba(X_te)[:, 1]
@@ -820,6 +990,7 @@ def tune_mtl(symbols: list[str]) -> None:
         df = df.set_index("time")
         df = _add_mtl_extra(df, sym, all_data) if has_rsi else add_features_mtl(df, sym, all_data)
         df = add_trade_outcome_labels(df)
+        df = filter_setup_candidates(df, sym, "MTL tune")
         df = df.reset_index()
         df["symbol"] = sym
         dfs.append(df)
@@ -866,7 +1037,9 @@ def tune_mtl(symbols: list[str]) -> None:
         for mw in [15, 20]
     ]
 
-    best_score, best_params, best_threshold = -999.0, {}, 0.5
+    best_score, best_params = -999.0, {}
+    best_thresholds: dict[str, float] = {}
+    best_pair_stats: dict[str, dict] = {}
     best_train_exp, best_val_exp = 0.0, 0.0
 
     for params in param_grid:
@@ -886,17 +1059,20 @@ def tune_mtl(symbols: list[str]) -> None:
 
         val_proba = model.predict_proba(X_val)[:, 1]
         val_auc   = roc_auc_score(y_val, val_proba)
-        val_exp, val_threshold, val_wr, val_avg_win, val_avg_loss, val_trades = best_expectancy_threshold(
+        val_thresholds, val_pair_stats, val_metrics = best_expectancy_thresholds_by_symbol(
             val_proba,
             combined.loc[val_idx, MTL_R_MULTIPLE],
-            min_trades=max(50, int(len(X_val) * 0.03)),
+            combined.loc[val_idx, "symbol"],
+            min_trades_per_symbol=max(10, int((len(X_val) / len(symbols)) * 0.03)),
         )
+        val_exp, val_wr, val_avg_win, val_avg_loss, val_trades = val_metrics
         train_proba = model.predict_proba(X_tr)[:, 1]
         train_auc = roc_auc_score(y_tr, train_proba)
-        train_exp, train_wr, train_avg_win, train_avg_loss, train_trades = trading_expectancy_score(
+        train_exp, train_wr, train_avg_win, train_avg_loss, train_trades = expectancy_with_symbol_thresholds(
             train_proba,
             combined.loc[train_idx, MTL_R_MULTIPLE],
-            threshold=val_threshold,
+            combined.loc[train_idx, "symbol"],
+            val_thresholds,
             min_trades=1,
         )
         composite_score = conservative_generalization_score(train_exp, val_exp)
@@ -907,7 +1083,7 @@ def tune_mtl(symbols: list[str]) -> None:
             f"train_auc={train_auc:.4f}  train_trades={train_trades}  "
             f"  val_exp={val_exp:.3f}R  val_wr={val_wr * 100:.1f}%  "
             f"val_avgW={val_avg_win:.2f}R  val_avgL={val_avg_loss:.2f}R  "
-            f"threshold={val_threshold:.2f}  val_trades={val_trades}  "
+            f"thresholds={val_thresholds}  val_trades={val_trades}  "
             f"val_auc={val_auc:.4f}  "
             f"best_iter={model.best_iteration + 1}"
         )
@@ -915,14 +1091,15 @@ def tune_mtl(symbols: list[str]) -> None:
         if composite_score > best_score:
             best_score = composite_score
             best_params = params
-            best_threshold = val_threshold
+            best_thresholds = val_thresholds
+            best_pair_stats = val_pair_stats
             best_train_exp = train_exp
             best_val_exp = val_exp
 
     log.info(
         f"=== Best generalized params: composite={best_score:.3f}  "
         f"train_expectancy={best_train_exp:.3f}R  val_expectancy={best_val_exp:.3f}R  "
-        f"threshold={best_threshold:.2f}  params={best_params} ==="
+        f"thresholds={best_thresholds}  params={best_params} ==="
     )
 
     # Train final model with best params
@@ -941,20 +1118,56 @@ def tune_mtl(symbols: list[str]) -> None:
     final.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
     blind_proba = final.predict_proba(X_blind)[:, 1]
     blind_auc = roc_auc_score(y_blind, blind_proba)
-    blind_exp, blind_wr, blind_avg_win, blind_avg_loss, blind_trades = trading_expectancy_score(
+    blind_exp, blind_wr, blind_avg_win, blind_avg_loss, blind_trades = expectancy_with_symbol_thresholds(
         blind_proba,
         combined.loc[blind_idx, MTL_R_MULTIPLE],
-        threshold=best_threshold,
+        combined.loc[blind_idx, "symbol"],
+        best_thresholds,
         min_trades=1,
     )
     log.info(
         f"Final BLIND test AUC: {blind_auc:.4f} | expectancy={blind_exp:.3f}R | "
         f"WR={blind_wr * 100:.1f}% | AvgW={blind_avg_win:.2f}R | AvgL={blind_avg_loss:.2f}R | "
-        f"threshold={best_threshold:.2f} | trades={blind_trades}"
+        f"thresholds={best_thresholds} | trades={blind_trades}"
     )
 
     joblib.dump(final, MODELS_DIR / "mtl_filter.pkl")
     joblib.dump(FEATURES_MTL, MODELS_DIR / "mtl_filter_features.pkl")
+    thresholds_path = MODELS_DIR / "mtl_thresholds.json"
+    thresholds_path.write_text(json.dumps(best_thresholds, indent=2, sort_keys=True), encoding="utf-8")
+    report_lines = [
+        "=== Tuned MTL Filter Report ===",
+        f"Symbols: {', '.join(SYMBOLS)}",
+        f"Total samples: {len(combined)} (train={len(X_tr)}, val={len(X_val)}, blind={len(X_blind)})",
+        f"Setup-only training: {'enabled' if SETUP_ONLY_TRAINING else 'disabled'}",
+        f"Setup filter mode: {SETUP_FILTER_MODE}",
+        f"Setup max CHoCH age: {SETUP_MAX_CHOCH_AGE}",
+        f"Weak-symbol disabling: {'enabled' if DISABLE_WEAK_SYMBOLS else 'disabled'} "
+        f"(min_val_exp={MIN_PAIR_VALIDATION_EXPECTANCY:.3f}R)",
+        f"Best params: {best_params}",
+        f"Composite score: {best_score:.3f}",
+        f"Train Expectancy: {best_train_exp:.3f}R",
+        f"Validation Expectancy: {best_val_exp:.3f}R",
+        "Selected thresholds:",
+        *[
+            f"  {symbol}: {stats['threshold']:.2f} | "
+            f"val_exp={stats['expectancy']:.3f}R | "
+            f"WR={stats['win_rate'] * 100:.1f}% | trades={stats['trades']}"
+            f"{' | DISABLED' if stats.get('disabled') else ''}"
+            for symbol, stats in sorted(best_pair_stats.items())
+        ],
+        "",
+        "Final Blind Test:",
+        f"  AUC: {blind_auc:.4f}",
+        f"  Expectancy: {blind_exp:.3f}R",
+        f"  Win Rate: {blind_wr * 100:.1f}%",
+        f"  Avg Win: {blind_avg_win:.2f}R",
+        f"  Avg Loss: {blind_avg_loss:.2f}R",
+        f"  Trades: {blind_trades}",
+        "",
+        "Note: Expectancy is calculated only on per-symbol thresholded model trades.",
+    ]
+    (MODELS_DIR / "mtl_filter_report.txt").write_text("\n".join(report_lines), encoding="utf-8")
     log.info(f"Tuned model saved -> {MODELS_DIR / 'mtl_filter.pkl'}")
 
 

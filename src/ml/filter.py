@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import csv
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ LOGS_DIR    = Path(__file__).parent.parent.parent / "logs"
 AB_TEST_LOG = LOGS_DIR / "ab_test_scores.csv"
 
 FALLBACK_MODEL = MODELS_DIR / "ml_filter.pkl"
+MTL_THRESHOLDS = MODELS_DIR / "mtl_thresholds.json"
 DEFAULT_THRESHOLD = 0.52
 
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
@@ -60,6 +62,10 @@ FEATURES_MTL = [
     "cross_correlation_usd",
     "pair_id_eurusd", "pair_id_gbpusd", "pair_id_usdjpy",
     "pair_id_usdchf", "pair_id_audusd", "pair_id_usdcad", "pair_id_nzdusd",
+    "is_london_session",
+    "is_ny_session",
+    "hour_sin",
+    "hour_cos",
 ]
 
 
@@ -137,6 +143,10 @@ def _build_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
             hour, dow = 10, 1
 
         session = _session(hour)
+        is_london_session = int(8 <= hour < 16)
+        is_ny_session = int(13 <= hour < 21)
+        hour_sin = np.sin(2 * np.pi * hour / 24)
+        hour_cos = np.cos(2 * np.pi * hour / 24)
 
         momentum_alignment = int(macd_hist > 0) + int(rsi > 50) + int(bb_pos > 0.5)
         trend_strength     = (abs(pct_from_sma20) + abs(pct_from_sma50)) / 2
@@ -164,6 +174,10 @@ def _build_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
             "vol_spike":          vol_spike,
             "rsi_extreme":        rsi_extreme,
             "atr_regime":         atr_regime,
+            "is_london_session":  is_london_session,
+            "is_ny_session":      is_ny_session,
+            "hour_sin":           hour_sin,
+            "hour_cos":           hour_cos,
         }])
 
     except Exception as e:
@@ -247,12 +261,14 @@ class MLFilter:
         self._fallback_features = None
         self._mtl_model    = None
         self._mtl_features = None
+        self._mtl_thresholds: dict[str, float] = {}
 
         self._pair_cache = SHARED_PAIR_CACHE
 
         self._load_fallback()
         if use_mtl:
             self._load_mtl_model()
+            self._load_mtl_thresholds()
 
     # ── Model loaders ────────────────────────────────────────────────────
 
@@ -308,6 +324,15 @@ class MLFilter:
         except Exception as e:
             log.warning(f"MLFilter: failed to load MTL model: {e}")
             self.use_mtl = False
+
+    def _load_mtl_thresholds(self) -> None:
+        try:
+            if MTL_THRESHOLDS.exists():
+                raw = json.loads(MTL_THRESHOLDS.read_text(encoding="utf-8"))
+                self._mtl_thresholds = {str(k).upper(): float(v) for k, v in raw.items()}
+                log.info(f"MLFilter: MTL thresholds loaded for {sorted(self._mtl_thresholds)}")
+        except Exception as e:
+            log.warning(f"MLFilter: failed to load MTL thresholds: {e}")
 
     @property
     def available(self) -> bool:
@@ -399,8 +424,10 @@ class MLFilter:
         return old_score, mtl_score
 
     def should_trade(self, df: pd.DataFrame, symbol: str | None = None) -> tuple[bool, float]:
+        symbol = (symbol or self.symbol).upper()
         prob = self.score(df, symbol)
-        return prob >= self.threshold, prob
+        threshold = self._mtl_thresholds.get(symbol, self.threshold) if self.use_mtl else self.threshold
+        return prob >= threshold, prob
 
     # ── A/B logging ──────────────────────────────────────────────────────
 
